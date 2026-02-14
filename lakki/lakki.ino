@@ -24,15 +24,78 @@ The app expects Nordic UART Service (NUS)-style UUIDs:
 
 #include "external_navigation_protocol.h"
 
-#define LED_IND_LOOPS 5000;
+#define LED_IND_LOOPS 1000;
+
 
 static const int debug = 0;
+
+/*
+ * Let's agree that the direction where the cap points at, is 0.
+ * So, leftmost LED should indicate anything from behind user to directly left - Eg, 180 => 180 + 90
+ */
+
+#define DIR_BACK 180
+#define DIR_LEFT (180 + 90)
+#define DIR_RIGHT (180 - 90)
+
+#define DIR_BACK_LEFT_LED (DIR_BACK + 45)
+#define SECTOR_BACK_LEFT_LED 90
+
+#define DIR_BACK_RIGHT_LED (DIR_BACK - 45)
+#define SECTOR_BACK_RIGHT_LED 90
+
+#define DIR_FRONT_LEFT_LED (DIR_LEFT + 35)
+#define SECTOR_FRONT_LEFT_LED 70
+
+#define DIR_FRONT_RIGHT_LED (DIR_RIGHT - 35)
+#define SECTOR_FRONT_RIGHT_LED 70
+
+#define DIR_FRONT_LED 0
+#define SECTOR_FRONT_LED 40
+
+
+struct mva_led {
+  /* GPIO number*/
+  int gpio_pin;
+  /* Sector this LED points, relative to cap-dir*/
+  uint16_t dir;
+  uint16_t sector_width;
+};
+
+#define NUM_LEDS 5
+
+static const struct mva_led g_led_arr[] =
+{
+  /* LEDs, left to right */
+  {
+    .gpio_pin = D2,
+    .dir = DIR_BACK_LEFT_LED,
+    .sector_width = SECTOR_BACK_LEFT_LED,
+  }, {
+    .gpio_pin = D3,
+    .dir = DIR_FRONT_LEFT_LED,
+    .sector_width = SECTOR_FRONT_LEFT_LED,
+  }, {
+    .gpio_pin = D4,
+    .dir = DIR_FRONT_LED,
+    .sector_width = SECTOR_FRONT_LED,
+  }, {
+    .gpio_pin = D6,
+    .dir = DIR_FRONT_RIGHT_LED,
+    .sector_width = SECTOR_FRONT_RIGHT_LED,
+  }, {
+    .gpio_pin = D5,
+    .dir = DIR_BACK_RIGHT_LED,
+    .sector_width = SECTOR_BACK_RIGHT_LED,
+  },
+};
 
 enum lakki_state {
   STATE_INIT,
   HANDSHAKE_RECVD,
   DEST_SET,
   SEND_CAP_DIR,
+  TURN_OFF_LEDS,
 };
 
 static bool hiawatha()
@@ -296,11 +359,42 @@ void setupAdvertising() {
   Serial.println("[BLE] Advertising started");
 }
 
+void blink(int pin, int numblink)
+{
+  int i;
+
+   Serial.printf("Blink LED %d, %d times\n", pin, numblink);
+
+  for (i = 0; i < numblink; i++){
+    digitalWrite(pin, HIGH);
+    delay(300);
+    digitalWrite(pin, LOW);
+    delay(300);
+  }
+}
+
+void setup_led_gpios()
+{
+  int i;
+  for (i = 0; i < NUM_LEDS; i++) {
+    const struct mva_led *led = &g_led_arr[i];
+
+    pinMode(led->gpio_pin, OUTPUT);
+    blink(led->gpio_pin, i + 1);/*
+    digitalWrite(led->gpio_pin, HIGH);
+    delay(500);
+    digitalWrite(led->gpio_pin, LOW);
+    */
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
   delay(3000);
   Serial.println("[SYS] Boot");
+
+  setup_led_gpios();
 
   BLEDevice::init("LakkiCap");
 
@@ -327,6 +421,11 @@ void setup() {
   setupAdvertising();
 }
 
+static bool is_leds_off_set()
+{
+  return (g_state & (1 << TURN_OFF_LEDS));
+}
+
 static bool is_dest_set()
 {
   return (g_state & (1 << DEST_SET));
@@ -347,6 +446,43 @@ static void handshake_reply()
   del_state(HANDSHAKE_RECVD);
 }
 
+static void litemup()
+{
+  unsigned short dir = g_direction;
+  int i;
+
+  for (i = i; i < NUM_LEDS; i++) {
+    const struct mva_led *led = &g_led_arr[i];
+    unsigned short sector_left, sector_right;
+    unsigned short half_sector = led->sector_width / 2;
+
+    if (led->dir == 0)
+      sector_left = 360 - half_sector;
+    else
+      sector_left = led->dir - half_sector;
+
+    sector_right = led->dir + half_sector;
+
+    if ((led->dir && dir > sector_left && dir < sector_right) ||
+        (!led->dir &&
+          (
+           (dir > sector_left && dir <= 360) ||
+           (dir < sector_right))))
+      digitalWrite(led->gpio_pin, HIGH);
+    else
+      digitalWrite(led->gpio_pin, LOW);
+  }
+}
+
+static void leds_off()
+{
+  int i;
+  for (i = 0; i < NUM_LEDS; i++)
+    digitalWrite(g_led_arr[i].gpio_pin, LOW);
+
+  del_state(TURN_OFF_LEDS);
+}
+
 static void show_destination()
 {
   /* Loop counter for keeping LEDs lit for LED_IND_LOOPS loops*/
@@ -356,11 +492,13 @@ static void show_destination()
   if (ctr <= 0) {
     ctr = LED_IND_LOOPS;
     del_state(DEST_SET);
+    add_state(TURN_OFF_LEDS);
   }
   /*
    * Turn off all LED's except the LED to show correct direction.
    * Lit correct direction LED.
    */
+   litemup();
   return;
 }
 
@@ -392,6 +530,10 @@ static void cap_dir_send()
 
 static void state_machine()
 {
+  if (is_leds_off_set())
+  {
+    leds_off();
+  }
   if (is_dest_set()) {
       /* Light destination LED(s) */
       show_destination();
