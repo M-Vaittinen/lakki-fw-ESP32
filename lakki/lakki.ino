@@ -114,6 +114,49 @@ static unsigned short g_direction;
 static unsigned short g_dest_dir;
 static unsigned int g_distance;
 
+static int apply_declination_deg(int dir)
+{
+  /*
+   * The 'Lakki' is mostly going to be used in known location.
+   * Let's use a fixed declination matching that location for now.
+   * TODO: Think of a way to compute the declination on mobile application,
+   * based on the GPS location, and send the declination information
+   * via new BLE message when navigation is started.
+   */
+  int kok_at_enis = -15;
+
+  dir -= kok_at_enis;
+
+  while (dir < 0)
+    dir += 360;
+
+  while (dir > 360)
+    dir -= 360;
+
+  return dir;
+}
+
+static unsigned int head2deg(float heading)
+{
+  heading *= 180/M_PI;
+
+  return (int)heading;
+}
+
+static void update_heading()
+{
+    int16_t x = 1,y = 2, z = 3;
+    float heading;
+
+    heading = atan2(y, x);
+    Serial.printf("x=%hd, y=%hd, z=%hd, heading=%f\n", x, y, z, heading);
+
+    g_direction = apply_declination_deg(head2deg(heading));
+
+    Serial.print("Foo (degrees): "); Serial.println(g_direction);
+  }
+}
+
 // Matches app/src/main/java/com/example/lakki_phone/bluetooth/BleGattClient.kt
 static BLEUUID SERVICE_UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
 static BLEUUID RX_CHAR_UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"); // phone -> cap (WRITE)
@@ -150,7 +193,6 @@ enum lakki_state {
   SEND_CAP_DIR,
   TURN_OFF_LEDS,
 };
-
 
 static void add_state(unsigned int state) {
   g_state |= 1 << state;
@@ -411,6 +453,21 @@ static void handshake_reply()
   del_state(HANDSHAKE_RECVD);
 }
 
+bool is_get_dir_set()
+{
+  if (TEST_MAG) {
+    static int ctr;
+
+    ctr++;
+    if (!(ctr & 0xff))
+      return true;
+
+  return false;
+  }
+
+ return is_cap_dir_send_en() | is_dest_set(); */
+}
+
 static void litemup()
 {
   unsigned short dir = g_direction;
@@ -495,6 +552,10 @@ static void cap_dir_send()
 
 static void state_machine()
 {
+  if (is_get_dir_set())
+  {
+    update_heading();
+  }
   if (is_leds_off_set())
   {
     leds_off();
