@@ -1,21 +1,18 @@
-/*# ESP32 cap BLE sketch aligned with Lakki phone app
-
-This sketch is designed to match the Android BLE GATT client in
-`app/src/main/java/com/example/lakki_phone/bluetooth/BleGattClient.kt`.
-
-## UUID alignment
-
-The app expects Nordic UART Service (NUS)-style UUIDs:
-
-- Service: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
-- RX (phone writes to cap): `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
-- TX (cap notifies phone): `6E400003-B5A3-F393-E0A9-E50E24DCCA9E`
-- CCCD descriptor (`BLE2902`) must be present on TX.
-
-## Complete Arduino ESP32 sketch
-
-```cpp
-*/
+/*
+ * Lakki Firmis.
+ *
+ * Author: Matti Vaittinen <mazziesaccount@gmail.com>
+ *
+ * No warranty. Use at own risk. May cause damage.
+ *
+ * This sketch implements a "navigation hat" :)
+ * It is designed to match the Android BLE GATT client.
+ *
+ * The BLE connection has been written assisted by AI. Rest of
+ * the stuff here is hand crafted.
+ *
+ * Copyright 2026 Matti Vaittinen <mazziesaccount@gmail.com>
+ */
 
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -586,50 +583,3 @@ void loop() {
 
   delay(10);
 }
-
-/*
-```
-
-## Why this matches the app
-
-- The app connects as BLE GATT client and discovers the NUS service UUID above.
-- The app writes commands to the RX characteristic UUID (`...0002...`).
-- The app subscribes to notifications on TX UUID (`...0003...`) by writing CCCD.
-- The sketch includes `BLE2902` on TX so CCCD writes succeed.
-
-## Audit of current Android connection flow
-
-Based on `BleGattClient.kt`, the current flow is:
-
-1. `connectGatt(...)`
-2. `discoverServices()` in `onConnectionStateChange(...STATE_CONNECTED...)`
-3. Resolve service and characteristics in `onServicesDiscovered(...)`
-4. Enable local notification routing via `setCharacteristicNotification(...)`
-5. Write TX CCCD descriptor with `ENABLE_NOTIFICATION_VALUE`
-6. Mark client `CONNECTED` in `onDescriptorWrite(...)`
-
-This is a valid and expected Android BLE flow.
-
-### Potentially unnecessary/redundant step
-
-- In `onConnectionStateChange(...STATE_CONNECTED...)`, state is set to `CONNECTING`
-  again even though `connect()` already set `CONNECTING`. This is mostly harmless but
-  redundant UI/state churn.
-
-### Optional improvements (not strictly unnecessary)
-
-- Request MTU (`requestMtu(185)` for example) after connect/discovery to improve throughput
-  for larger protocol messages; the client already handles `onMtuChanged(...)`.
-- Optionally call `discoverServices()` only once per new GATT object (already effectively true).
-- Keep descriptor write as-is; it is required for notifications.
-
-## Cap-side checklist for first successful notify
-
-1. Boot + `BLEDevice::init("LakkiCap")`
-2. Create server, service, RX(write), TX(notify), TX `BLE2902`
-3. Start service and advertising with service UUID
-4. Android connects and discovers services
-5. Android writes CCCD for TX notifications
-6. Cap calls `pTxCharacteristic->notify()` with payload bytes
-
-*/
