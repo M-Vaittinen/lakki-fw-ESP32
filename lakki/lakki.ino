@@ -19,12 +19,19 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
+#include <Adafruit_QMC5883P.h>
 #include "external_navigation_protocol.h"
+
+#define TEST_MAG
 
 #define LED_IND_LOOPS 1000;
 
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(_arr) (sizeof(_arr)/sizeof(_arr[0]))
+#endif
 
 static const int debug = 0;
+Adafruit_QMC5883P qmc;
 
 /*
  * Let's agree that the direction where the cap points at, is 0.
@@ -114,6 +121,135 @@ static unsigned short g_direction;
 static unsigned short g_dest_dir;
 static unsigned int g_distance;
 
+struct print_info_item {
+  const char *label;
+  unsigned int val;
+};
+
+struct print_info {
+  const char *setlabel;
+  const struct print_info_item *item;
+  unsigned int num_item;
+};
+
+#define PR_IT(_lab, _val) \
+  {                       \
+    .label = (_lab),      \
+    .val = (_val),        \
+  }
+
+#define PR_I(_setlab, _itms)      \
+  {                               \
+    .setlabel = (_setlab),        \
+    .item = (_itms),              \
+    .num_item = ARRAY_SIZE(_itms) \
+  }
+
+static const struct print_info_item range_info_items[] = {
+  PR_IT("±30G", QMC5883P_RANGE_30G),
+  PR_IT("±12G", QMC5883P_RANGE_12G),
+  PR_IT("±8G", QMC5883P_RANGE_8G),
+  PR_IT("±2G", QMC5883P_RANGE_2G),
+};
+
+static const struct print_info_item reset_info_items[] = {
+  PR_IT("Set and Reset On", QMC5883P_SETRESET_ON),
+  PR_IT("Set Only On", QMC5883P_SETRESET_SETONLY),
+  PR_IT("Set and Reset Off", QMC5883P_SETRESET_OFF),
+};
+
+static const struct print_info_item odr_info_items[] = {
+  PR_IT("10Hz",QMC5883P_ODR_10HZ),
+  PR_IT("50Hz",QMC5883P_ODR_50HZ),
+  PR_IT("100Hz",QMC5883P_ODR_100HZ),
+  PR_IT("200Hz",QMC5883P_ODR_200HZ),
+};
+
+static const struct print_info_item mode_info_items[] = {
+  PR_IT("Suspend" ,QMC5883P_MODE_SUSPEND),
+  PR_IT("Normal" ,QMC5883P_MODE_NORMAL),
+  PR_IT("Single" ,QMC5883P_MODE_SINGLE),
+  PR_IT("Continuous" ,QMC5883P_MODE_CONTINUOUS),
+};
+
+static const struct print_info_item osr_info_items[] = {
+  PR_IT("8", QMC5883P_OSR_8),
+  PR_IT("4", QMC5883P_OSR_4),
+  PR_IT("2", QMC5883P_OSR_2),
+  PR_IT("1", QMC5883P_OSR_1),
+};
+
+static const struct print_info_item dsr_info_items[] = {
+  PR_IT("1", QMC5883P_DSR_1),
+  PR_IT("2", QMC5883P_DSR_2),
+  PR_IT("4", QMC5883P_DSR_4),
+  PR_IT("8", QMC5883P_DSR_8),
+};
+
+static const struct print_info dsr_info = PR_I("DSR (Downsample Ratio): ", dsr_info_items);
+static const struct print_info osr_info = PR_I("OSR (Over Sample Ratio): ", osr_info_items);
+static const struct print_info odr_info = PR_I("ODR (Output Data Rate): ", odr_info_items);
+static const struct print_info mode_info = PR_I("Mode: ", mode_info_items);
+static const struct print_info range_info = PR_I("Range: ", range_info_items);
+static const struct print_info reset_info = PR_I("Set/Reset Mode: ", reset_info_items);
+
+static void printinfo(const struct print_info *info, unsigned int val)
+{
+  int i;
+
+  Serial.print(info->setlabel);
+
+  for (i = 0; i < info->num_item; i++) {
+    const struct print_info_item *it = &info->item[i];
+    if (val == it->val) {
+      Serial.println(it->label);
+      return;
+    }
+  }
+  Serial.println("Unknown");
+}
+
+static void displaySensorDetails(void)
+{
+  printinfo(&mode_info, qmc.getMode());
+  printinfo(&odr_info, qmc.getODR());
+  printinfo(&osr_info, qmc.getOSR());
+  printinfo(&dsr_info, qmc.getDSR());
+  printinfo(&range_info, qmc.getRange());
+  printinfo(&reset_info, qmc.getSetResetMode());
+}
+
+static void mag_init()
+{
+  if (!qmc.begin()) {
+    Serial.println("Failed to find QMC5883P chip");
+    while (1)
+      delay(10);
+  }
+
+  Serial.println("QMC5883P Found!");
+
+  // Set to normal mode
+  qmc.setMode(QMC5883P_MODE_NORMAL);
+
+  // Set ODR (Output Data Rate) to 50Hz
+  qmc.setODR(QMC5883P_ODR_50HZ);
+
+ // Set OSR (Over Sample Ratio) to 4
+  qmc.setOSR(QMC5883P_OSR_4);
+
+  // Set DSR (Downsample Ratio) to 2
+  qmc.setDSR(QMC5883P_DSR_2);
+
+   // Set Range to 2G
+  qmc.setRange(QMC5883P_RANGE_2G);
+
+    // Set SetReset mode to On
+  qmc.setSetResetMode(QMC5883P_SETRESET_ON);
+
+  displaySensorDetails();
+}
+
 static int apply_declination_deg(int dir)
 {
   /*
@@ -145,7 +281,8 @@ static unsigned int head2deg(float heading)
 
 static void update_heading()
 {
-    int16_t x = 1,y = 2, z = 3;
+  int16_t x,y,z;
+  if (qmc.getRawMagnetic(&x, &y, &z)) {
     float heading;
 
     heading = atan2(y, x);
@@ -402,6 +539,8 @@ void setup() {
   Serial.println("[SYS] Boot");
 
   setup_led_gpios();
+
+  mag_init();
 
   BLEDevice::init("LakkiCap");
 
