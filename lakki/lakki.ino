@@ -50,7 +50,6 @@ static const int debug = 0;
 #define DIR_FRONT_LED 0
 #define SECTOR_FRONT_LED 40
 
-
 struct mva_led {
   /* GPIO number*/
   int gpio_pin;
@@ -87,13 +86,6 @@ static const struct mva_led g_led_arr[] =
   },
 };
 
-enum lakki_state {
-  STATE_INIT,
-  HANDSHAKE_RECVD,
-  DEST_SET,
-  SEND_CAP_DIR,
-  TURN_OFF_LEDS,
-};
 
 static bool hiawatha()
 {
@@ -151,11 +143,20 @@ class CapServerCallbacks : public BLEServerCallbacks {
   }
 };
 
-static void add_state(lakki_state state) {
+enum lakki_state {
+  STATE_INIT,
+  HANDSHAKE_RECVD,
+  DEST_SET,
+  SEND_CAP_DIR,
+  TURN_OFF_LEDS,
+};
+
+
+static void add_state(unsigned int state) {
   g_state |= 1 << state;
 }
 
-static void del_state(lakki_state state) {
+static void del_state(unsigned int state) {
   g_state &= ~(1 << state);
 }
 
@@ -252,17 +253,9 @@ static const struct msg_handlers g_handlers[] = {
 
 class CapRxCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* characteristic) override {
-    /*
-     * Make a copy as an attempt to not access something
-     * which may change under the hood. This may not be safe.
-     * (I've no idea if characteristic contains pointers)
-     */
- //   BLECharacteristic c = *characteristic;
     struct msg_header *hdr;
     void *data = characteristic->getData();
     unsigned int data_len = characteristic->getLength();
-//    enp_message_type_t *type;
-//    uint32_t *msg_len;
     unsigned int handled = 0;
 
     Serial.printf("Char len %u\n", data_len);
@@ -279,8 +272,6 @@ class CapRxCallbacks : public BLECharacteristicCallbacks {
         return;
       
       hdr =  (struct msg_header*)(((uint8_t *)data) + handled);
-//      type = (enp_message_type_t *)
-//      msg_len = (((uint32_t *)type) + 1);
       if (!hdr->msg_len)
         return;
 
@@ -311,25 +302,6 @@ class CapRxCallbacks : public BLECharacteristicCallbacks {
 out_handled:
       handled += len_le;
     }
-    /*
-    std::string value = characteristic->getValue();
-    if (value.empty()) {
-      return;
-    }
-
-    Serial.printf("[BLE] RX %u bytes: ", (unsigned)value.size());
-    for (size_t i = 0; i < value.size(); ++i) {
-      Serial.printf("%02X ", (uint8_t)value[i]);
-    }
-    Serial.println();
-
-    // TODO: parse app frames and execute command.
-    // Example echo ACK with same payload:
-    if (deviceConnected && pTxCharacteristic != nullptr) {
-      pTxCharacteristic->setValue((uint8_t*)value.data(), value.size());
-      pTxCharacteristic->notify();
-    }
-    */
   }
 };
 
@@ -377,11 +349,7 @@ void setup_led_gpios()
     const struct mva_led *led = &g_led_arr[i];
 
     pinMode(led->gpio_pin, OUTPUT);
-    blink(led->gpio_pin, i + 1);/*
-    digitalWrite(led->gpio_pin, HIGH);
-    delay(500);
-    digitalWrite(led->gpio_pin, LOW);
-    */
+    blink(led->gpio_pin, i + 1);
   }
 }
 
@@ -573,12 +541,8 @@ void loop() {
 
     pTxCharacteristic->setValue(payload, sizeof(payload));
     pTxCharacteristic->notify();
-    // Serial.println("[BLE] TX notify sent");
   }
- // if (debug) {
- //   Serial.println("Loopiti Loopiti");
- //   delay(1000);
- // }
+
   state_machine();
 
   delay(10);
