@@ -18,6 +18,8 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <Wire.h>
+#include "ICM_20948.h"
 
 #include "external_navigation_protocol.h"
 
@@ -114,6 +116,15 @@ static unsigned short g_direction;
 static unsigned short g_dest_dir;
 static unsigned int g_distance;
 
+#define WIRE_PORT Wire
+#define ICM_AD0_VAL 1
+
+static ICM_20948_I2C g_icm;
+static bool g_icm_ready;
+static float g_roll_rad;
+static float g_pitch_rad;
+static uint32_t g_last_heading_ms;
+
 static int apply_declination_deg(int dir)
 {
   /*
@@ -123,14 +134,14 @@ static int apply_declination_deg(int dir)
    * based on the GPS location, and send the declination information
    * via new BLE message when navigation is started.
    */
-  int kok_at_enis = -15;
+  int enontekio_declination = 15;
 
-  dir -= kok_at_enis;
+  dir -= enontekio_declination;
 
   while (dir < 0)
     dir += 360;
 
-  while (dir > 360)
+  while (dir >= 360)
     dir -= 360;
 
   return dir;
@@ -143,17 +154,118 @@ static unsigned int head2deg(float heading)
   return (int)heading;
 }
 
+static float wrap_pi(float rad)
+{
+  while (rad > PI)
+    rad -= 2.0f * PI;
+  while (rad < -PI)
+    rad += 2.0f * PI;
+
+  return rad;
+}
+
+static bool setup_compass()
+{
+  bool initialized = false;
+
+  WIRE_PORT.begin();
+  WIRE_PORT.setClock(400000);
+
+  for (int i = 0; i < 10 && !initialized; i++) {
+    g_icm.begin(WIRE_PORT, ICM_AD0_VAL);
+    if (g_icm.status == ICM_20948_Stat_Ok)
+      initialized = true;
+    else
+      delay(200);
+  }
+
+  if (!initialized) {
+    Serial.print("[ICM] Init failed: ");
+    Serial.println(g_icm.statusString());
+    return false;
+  }
+
+  g_icm.swReset();
+  delay(250);
+  g_icm.sleep(false);
+  g_icm.lowPower(false);
+  g_icm.setSampleMode((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr), ICM_20948_Sample_Mode_Continuous);
+
+  ICM_20948_fss_t fss;
+  fss.a = gpm2;
+  fss.g = dps250;
+  g_icm.setFullScale((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr), fss);
+
+  ICM_20948_dlpcfg_t dlpcfg;
+  dlpcfg.a = acc_d111bw4_n136bw;
+  dlpcfg.g = gyr_d119bw5_n154bw3;
+  g_icm.setDLPFcfg((ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr), dlpcfg);
+  g_icm.enableDLPF(ICM_20948_Internal_Acc, true);
+  g_icm.enableDLPF(ICM_20948_Internal_Gyr, true);
+
+  g_icm.startupMagnetometer();
+  if (g_icm.status != ICM_20948_Stat_Ok) {
+    Serial.print("[ICM] Magnetometer startup failed: ");
+    Serial.println(g_icm.statusString());
+    return false;
+  }
+
+  Serial.println("[ICM] Compass ready");
+  g_last_heading_ms = millis();
+  g_roll_rad = 0.0f;
+  g_pitch_rad = 0.0f;
+
+  return true;
+}
+
 static void update_heading()
 {
-    int16_t x = 1,y = 2, z = 3;
-    float heading;
+  if (!g_icm_ready)
+    return;
 
-    heading = atan2(y, x);
-    Serial.printf("x=%hd, y=%hd, z=%hd, heading=%f\n", x, y, z, heading);
+  if (!g_icm.dataReady())
+    return;
 
-    g_direction = apply_declination_deg(head2deg(heading));
+  g_icm.getAGMT();
 
-    Serial.print("Foo (degrees): "); Serial.println(g_direction);
+  const float ax = g_icm.accX();
+  const float ay = g_icm.accY();
+  const float az = g_icm.accZ();
+  const float gx = g_icm.gyrX() * DEG_TO_RAD;
+  const float gy = g_icm.gyrY() * DEG_TO_RAD;
+  const float mx = g_icm.magX();
+  const float my = g_icm.magY();
+  const float mz = g_icm.magZ();
+
+  const uint32_t now = millis();
+  float dt = (now - g_last_heading_ms) / 1000.0f;
+  if (dt <= 0.0f || dt > 0.2f)
+    dt = 0.01f;
+  g_last_heading_ms = now;
+
+  const float acc_roll = atan2(ay, az);
+  const float acc_pitch = atan2(-ax, sqrtf((ay * ay) + (az * az)));
+
+  g_roll_rad = wrap_pi(0.98f * (g_roll_rad + gx * dt) + 0.02f * acc_roll);
+  g_pitch_rad = wrap_pi(0.98f * (g_pitch_rad + gy * dt) + 0.02f * acc_pitch);
+
+  const float sin_roll = sinf(g_roll_rad);
+  const float cos_roll = cosf(g_roll_rad);
+  const float sin_pitch = sinf(g_pitch_rad);
+  const float cos_pitch = cosf(g_pitch_rad);
+
+  const float mag_x_h = mx * cos_pitch + mz * sin_pitch;
+  const float mag_y_h = mx * sin_roll * sin_pitch + my * cos_roll - mz * sin_roll * cos_pitch;
+
+  float heading = atan2f(-mag_x_h, mag_y_h);
+  if (heading < 0.0f)
+    heading += 2.0f * PI;
+
+  g_direction = apply_declination_deg(head2deg(heading));
+
+  if (debug) {
+    Serial.printf("[ICM] dir=%u, roll=%0.2f, pitch=%0.2f\n", g_direction,
+                  g_roll_rad * RAD_TO_DEG, g_pitch_rad * RAD_TO_DEG);
   }
 }
 
@@ -402,6 +514,7 @@ void setup() {
   Serial.println("[SYS] Boot");
 
   setup_led_gpios();
+  g_icm_ready = setup_compass();
 
   BLEDevice::init("LakkiCap");
 
@@ -453,19 +566,9 @@ static void handshake_reply()
   del_state(HANDSHAKE_RECVD);
 }
 
-bool is_get_dir_set()
+static bool is_get_dir_set()
 {
-  if (TEST_MAG) {
-    static int ctr;
-
-    ctr++;
-    if (!(ctr & 0xff))
-      return true;
-
-  return false;
-  }
-
- return is_cap_dir_send_en() | is_dest_set(); */
+  return g_icm_ready && (is_cap_dir_send_en() || is_dest_set());
 }
 
 static void litemup()
@@ -473,7 +576,7 @@ static void litemup()
   unsigned short dir = g_direction;
   int i;
 
-  for (i = i; i < NUM_LEDS; i++) {
+  for (i = 0; i < NUM_LEDS; i++) {
     const struct mva_led *led = &g_led_arr[i];
     unsigned short sector_left, sector_right;
     unsigned short half_sector = led->sector_width / 2;
@@ -543,9 +646,6 @@ static void cap_dir_send()
   
     msg_send(&msg, sizeof(msg));
 
-    g_direction += 9;
-    if (g_direction >= 360)
-      g_direction = 0;
   }
     /* Send cap-dir message */
 }
@@ -584,24 +684,6 @@ void loop() {
   // Connection edge.
   if (deviceConnected && !previouslyConnected) {
     previouslyConnected = deviceConnected;
-  }
-
-  // Example periodic notification payload (replace with real cap data).
-  static uint32_t lastMs = 0;
-  const uint32_t now = millis();
-  if (deviceConnected && (now - lastMs) >= 1000) {
-    lastMs = now;
-
-    // Example payload: 4-byte big-endian int for direction-like telemetry.
-    uint8_t payload[4];
-    int32_t demoDirection = 90;
-    payload[0] = (demoDirection >> 24) & 0xFF;
-    payload[1] = (demoDirection >> 16) & 0xFF;
-    payload[2] = (demoDirection >> 8) & 0xFF;
-    payload[3] = demoDirection & 0xFF;
-
-    pTxCharacteristic->setValue(payload, sizeof(payload));
-    pTxCharacteristic->notify();
   }
 
   state_machine();
