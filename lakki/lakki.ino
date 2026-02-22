@@ -124,6 +124,19 @@ static bool g_icm_ready;
 static float g_roll_rad;
 static float g_pitch_rad;
 static uint32_t g_last_heading_ms;
+static float g_mag_min_x;
+static float g_mag_min_y;
+static float g_mag_min_z;
+static float g_mag_max_x;
+static float g_mag_max_y;
+static float g_mag_max_z;
+static float g_mag_off_x;
+static float g_mag_off_y;
+static float g_mag_off_z;
+
+#define MAG_CAL_TIMEOUT_MS 12000U
+#define MAG_CAL_MAX_SAMPLES 12000U
+#define MAG_CAL_MIN_SAMPLES 200U
 
 static int apply_declination_deg(int dir)
 {
@@ -218,6 +231,99 @@ static bool setup_compass()
   return true;
 }
 
+static void set_all_dir_leds(bool on)
+{
+  int i;
+
+  for (i = 0; i < NUM_LEDS; i++)
+    digitalWrite(g_led_arr[i].gpio_pin, on ? HIGH : LOW);
+}
+
+static void indicate_fault_all_leds()
+{
+  /* Keep all direction LEDs lit for clear user-visible warning. */
+  set_all_dir_leds(true);
+  delay(5000);
+  set_all_dir_leds(false);
+}
+
+static void calibrate_magnetometer()
+{
+  uint32_t samples = 0;
+  const uint32_t start_ms = millis();
+  uint32_t last_blink_toggle_ms = start_ms;
+  bool leds_on = false;
+
+  if (!g_icm_ready)
+    return;
+
+  g_mag_min_x = g_mag_min_y = g_mag_min_z = INFINITY;
+  g_mag_max_x = g_mag_max_y = g_mag_max_z = -INFINITY;
+  g_mag_off_x = g_mag_off_y = g_mag_off_z = 0.0f;
+
+  Serial.println("[CAL] Magnetometer calibration start");
+  Serial.println("[CAL] Move cap in figure-8 and full rotations...");
+
+  while ((millis() - start_ms) < MAG_CAL_TIMEOUT_MS && samples < MAG_CAL_MAX_SAMPLES) {
+    const uint32_t now = millis();
+
+    if ((now - last_blink_toggle_ms) >= 200) {
+      leds_on = !leds_on;
+      set_all_dir_leds(leds_on);
+      last_blink_toggle_ms = now;
+    }
+
+    if (!g_icm.dataReady()) {
+      delay(2);
+      continue;
+    }
+
+    g_icm.getAGMT();
+
+    const float mx = g_icm.magX();
+    const float my = g_icm.magY();
+    const float mz = g_icm.magZ();
+
+    if (mx < g_mag_min_x)
+      g_mag_min_x = mx;
+    if (my < g_mag_min_y)
+      g_mag_min_y = my;
+    if (mz < g_mag_min_z)
+      g_mag_min_z = mz;
+
+    if (mx > g_mag_max_x)
+      g_mag_max_x = mx;
+    if (my > g_mag_max_y)
+      g_mag_max_y = my;
+    if (mz > g_mag_max_z)
+      g_mag_max_z = mz;
+
+    samples++;
+
+    if ((samples % 100) == 0) {
+      Serial.printf("[CAL] samples=%lu elapsed=%lums\n", samples, now - start_ms);
+    }
+  }
+
+  set_all_dir_leds(false);
+
+  if (samples < MAG_CAL_MIN_SAMPLES) {
+    Serial.printf("[CAL] Warning: only %lu samples, calibration weak. Offsets left at 0.\n", samples);
+    indicate_fault_all_leds();
+    return;
+  }
+
+  g_mag_off_x = (g_mag_max_x + g_mag_min_x) * 0.5f;
+  g_mag_off_y = (g_mag_max_y + g_mag_min_y) * 0.5f;
+  g_mag_off_z = (g_mag_max_z + g_mag_min_z) * 0.5f;
+
+  Serial.printf("[CAL] done samples=%lu duration=%lums\n", samples, millis() - start_ms);
+  Serial.printf("[CAL] min=(%.2f, %.2f, %.2f) max=(%.2f, %.2f, %.2f)\n",
+                g_mag_min_x, g_mag_min_y, g_mag_min_z,
+                g_mag_max_x, g_mag_max_y, g_mag_max_z);
+  Serial.printf("[CAL] offsets=(%.2f, %.2f, %.2f)\n", g_mag_off_x, g_mag_off_y, g_mag_off_z);
+}
+
 static void update_heading()
 {
   if (!g_icm_ready)
@@ -236,6 +342,9 @@ static void update_heading()
   const float mx = g_icm.magX();
   const float my = g_icm.magY();
   const float mz = g_icm.magZ();
+  const float mx_c = mx - g_mag_off_x;
+  const float my_c = my - g_mag_off_y;
+  const float mz_c = mz - g_mag_off_z;
 
   const uint32_t now = millis();
   float dt = (now - g_last_heading_ms) / 1000.0f;
@@ -254,8 +363,8 @@ static void update_heading()
   const float sin_pitch = sinf(g_pitch_rad);
   const float cos_pitch = cosf(g_pitch_rad);
 
-  const float mag_x_h = mx * cos_pitch + mz * sin_pitch;
-  const float mag_y_h = mx * sin_roll * sin_pitch + my * cos_roll - mz * sin_roll * cos_pitch;
+  const float mag_x_h = mx_c * cos_pitch + mz_c * sin_pitch;
+  const float mag_y_h = mx_c * sin_roll * sin_pitch + my_c * cos_roll - mz_c * sin_roll * cos_pitch;
 
   float heading = atan2f(-mag_x_h, mag_y_h);
   if (heading < 0.0f)
@@ -515,6 +624,7 @@ void setup() {
 
   setup_led_gpios();
   g_icm_ready = setup_compass();
+  calibrate_magnetometer();
 
   BLEDevice::init("LakkiCap");
 
