@@ -159,10 +159,6 @@ static float g_mag_scale_y = 1.0f;
 static float g_mag_scale_z = 1.0f;
 static enp_cap_state_t g_cap_state = ENP_CAP_STATE_UNKNOWN;
 
-void msg_send(void *msg, unsigned int size);
-static void cap_state_set(enp_cap_state_t state, const char *info);
-static void ble_debug_logf(const char *fmt, ...);
-
 #define MAG_CAL_TIMEOUT_MS 18000U
 #define MAG_CAL_MAX_SAMPLES 18000U
 #define MAG_CAL_MIN_SAMPLES 200U
@@ -172,6 +168,113 @@ static void ble_debug_logf(const char *fmt, ...);
 #define CAL_STATE_SWITCH_DELAY_MS 1500U
 
 static void set_all_dir_leds(bool on);
+
+// Matches app/src/main/java/com/example/lakki_phone/bluetooth/BleGattClient.kt
+static BLEUUID SERVICE_UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+static BLEUUID RX_CHAR_UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"); // phone -> cap (WRITE)
+static BLEUUID TX_CHAR_UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"); // cap -> phone (NOTIFY)
+
+BLEServer* pServer = nullptr;
+BLEService* pService = nullptr;
+BLECharacteristic* pRxCharacteristic = nullptr;
+BLECharacteristic* pTxCharacteristic = nullptr;
+
+volatile bool deviceConnected = false;
+volatile bool previouslyConnected = false;
+
+
+void msg_send(void *msg, unsigned int size)
+{
+  /* This is not atomic... */
+  if (!deviceConnected)
+    return;
+  //Serial.printf("Sending msg %p, %u\n", msg, size);
+  pTxCharacteristic->setValue((uint8_t *)msg, size);
+  pTxCharacteristic->notify();
+}
+
+static size_t append_text_attr(uint8_t *buf, size_t max_len, const char *text)
+{
+  size_t text_len;
+  uint16_t attr_len;
+
+  if (!text || !text[0] || max_len < 4)
+    return 0;
+
+  text_len = strlen(text);
+  if (text_len > (max_len - 4))
+    text_len = max_len - 4;
+
+  attr_len = (uint16_t)(4 + text_len);
+  uint16_t be_attr_type = tobe16((uint16_t)ENP_ATTRIBUTE_TYPE_TEXT_UTF8);
+  uint16_t be_attr_len = tobe16(attr_len);
+
+  memcpy(&buf[0], &be_attr_type, sizeof(be_attr_type));
+  memcpy(&buf[2], &be_attr_len, sizeof(be_attr_len));
+  memcpy(&buf[4], text, text_len);
+
+  return attr_len;
+}
+
+static void cap_state_send(enp_cap_state_t state, const char *info)
+{
+  uint8_t msg[192] = {0};
+  size_t payload_len = 0;
+  struct msg_header *hdr = (struct msg_header *)msg;
+  enp_cap_state_header_t *state_hdr = (enp_cap_state_header_t *)(msg + sizeof(*hdr));
+
+  payload_len = append_text_attr(msg + sizeof(*hdr) + sizeof(*state_hdr),
+                                 sizeof(msg) - sizeof(*hdr) - sizeof(*state_hdr),
+                                 info);
+
+  hdr->type = tobe32(ENP_MESSAGE_TYPE_CAP_STATE);
+  hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*state_hdr) + payload_len));
+  state_hdr->state = tobe32((uint32_t)state);
+  state_hdr->reserved = 0;
+
+  msg_send(msg, sizeof(*hdr) + sizeof(*state_hdr) + payload_len);
+}
+
+static void cap_state_set(enp_cap_state_t state, const char *info)
+{
+  if (g_cap_state == state && (!info || !info[0]))
+    return;
+
+  g_cap_state = state;
+  cap_state_send(state, info);
+}
+
+static void debug_log_send(uint32_t severity, const char *line)
+{
+  uint8_t msg[192] = {0};
+  size_t payload_len = 0;
+  struct msg_header *hdr = (struct msg_header *)msg;
+  enp_debug_log_header_t *dbg_hdr = (enp_debug_log_header_t *)(msg + sizeof(*hdr));
+
+  payload_len = append_text_attr(msg + sizeof(*hdr) + sizeof(*dbg_hdr),
+                                 sizeof(msg) - sizeof(*hdr) - sizeof(*dbg_hdr),
+                                 line);
+
+  hdr->type = tobe32(ENP_MESSAGE_TYPE_DEBUG_LOG);
+  hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len));
+  dbg_hdr->severity = tobe32(severity);
+  dbg_hdr->reserved = 0;
+
+  msg_send(msg, sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len);
+}
+
+static void ble_debug_logf(const char *fmt, ...)
+{
+  char line[160];
+  va_list args;
+
+  va_start(args, fmt);
+  vsnprintf(line, sizeof(line), fmt, args);
+  va_end(args);
+
+  debug_log_send(0, line);
+}
+
 
 static bool has_sane_mag_scaling(float rx, float ry, float rz)
 {
@@ -505,19 +608,6 @@ static void update_heading()
   }
 }
 
-// Matches app/src/main/java/com/example/lakki_phone/bluetooth/BleGattClient.kt
-static BLEUUID SERVICE_UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-static BLEUUID RX_CHAR_UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"); // phone -> cap (WRITE)
-static BLEUUID TX_CHAR_UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"); // cap -> phone (NOTIFY)
-
-BLEServer* pServer = nullptr;
-BLEService* pService = nullptr;
-BLECharacteristic* pRxCharacteristic = nullptr;
-BLECharacteristic* pTxCharacteristic = nullptr;
-
-volatile bool deviceConnected = false;
-volatile bool previouslyConnected = false;
-
 class CapServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* server) override {
     deviceConnected = true;
@@ -694,98 +784,6 @@ out_handled:
     }
   }
 };
-
-void msg_send(void *msg, unsigned int size)
-{
-  /* This is not atomic... */
-  if (!deviceConnected)
-    return;
-  //Serial.printf("Sending msg %p, %u\n", msg, size);
-  pTxCharacteristic->setValue((uint8_t *)msg, size);
-  pTxCharacteristic->notify();
-}
-
-static size_t append_text_attr(uint8_t *buf, size_t max_len, const char *text)
-{
-  size_t text_len;
-  uint16_t attr_len;
-
-  if (!text || !text[0] || max_len < 4)
-    return 0;
-
-  text_len = strlen(text);
-  if (text_len > (max_len - 4))
-    text_len = max_len - 4;
-
-  attr_len = (uint16_t)(4 + text_len);
-  uint16_t be_attr_type = tobe16((uint16_t)ENP_ATTRIBUTE_TYPE_TEXT_UTF8);
-  uint16_t be_attr_len = tobe16(attr_len);
-
-  memcpy(&buf[0], &be_attr_type, sizeof(be_attr_type));
-  memcpy(&buf[2], &be_attr_len, sizeof(be_attr_len));
-  memcpy(&buf[4], text, text_len);
-
-  return attr_len;
-}
-
-static void cap_state_send(enp_cap_state_t state, const char *info)
-{
-  uint8_t msg[192] = {0};
-  size_t payload_len = 0;
-  struct msg_header *hdr = (struct msg_header *)msg;
-  enp_cap_state_header_t *state_hdr = (enp_cap_state_header_t *)(msg + sizeof(*hdr));
-
-  payload_len = append_text_attr(msg + sizeof(*hdr) + sizeof(*state_hdr),
-                                 sizeof(msg) - sizeof(*hdr) - sizeof(*state_hdr),
-                                 info);
-
-  hdr->type = tobe32(ENP_MESSAGE_TYPE_CAP_STATE);
-  hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*state_hdr) + payload_len));
-  state_hdr->state = tobe32((uint32_t)state);
-  state_hdr->reserved = 0;
-
-  msg_send(msg, sizeof(*hdr) + sizeof(*state_hdr) + payload_len);
-}
-
-static void cap_state_set(enp_cap_state_t state, const char *info)
-{
-  if (g_cap_state == state && (!info || !info[0]))
-    return;
-
-  g_cap_state = state;
-  cap_state_send(state, info);
-}
-
-static void debug_log_send(uint32_t severity, const char *line)
-{
-  uint8_t msg[192] = {0};
-  size_t payload_len = 0;
-  struct msg_header *hdr = (struct msg_header *)msg;
-  enp_debug_log_header_t *dbg_hdr = (enp_debug_log_header_t *)(msg + sizeof(*hdr));
-
-  payload_len = append_text_attr(msg + sizeof(*hdr) + sizeof(*dbg_hdr),
-                                 sizeof(msg) - sizeof(*hdr) - sizeof(*dbg_hdr),
-                                 line);
-
-  hdr->type = tobe32(ENP_MESSAGE_TYPE_DEBUG_LOG);
-  hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len));
-  dbg_hdr->severity = tobe32(severity);
-  dbg_hdr->reserved = 0;
-
-  msg_send(msg, sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len);
-}
-
-static void ble_debug_logf(const char *fmt, ...)
-{
-  char line[160];
-  va_list args;
-
-  va_start(args, fmt);
-  vsnprintf(line, sizeof(line), fmt, args);
-  va_end(args);
-
-  debug_log_send(0, line);
-}
 
 void setupAdvertising() {
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
