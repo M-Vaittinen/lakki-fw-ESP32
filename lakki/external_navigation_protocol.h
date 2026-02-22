@@ -45,6 +45,8 @@ typedef enum enp_message_type {
     ENP_MESSAGE_TYPE_CAP_DIRECTION = 5,
     ENP_MESSAGE_TYPE_CAP_DIRECTION_REQUEST_START = 6,
     ENP_MESSAGE_TYPE_CAP_DIRECTION_REQUEST_STOP = 7,
+    ENP_MESSAGE_TYPE_CAP_STATE = 8,
+    ENP_MESSAGE_TYPE_DEBUG_LOG = 9,
 } enp_message_type_t;
 
 struct msg_header {
@@ -53,6 +55,18 @@ struct msg_header {
 };
 
 #define MSG_PAYLOAD(hdr) (((uint8_t *)(hdr)) + sizeof(msg_header))
+/** CAP operational state enum used in CAP_STATE messages. */
+typedef enum enp_cap_state {
+    ENP_CAP_STATE_UNKNOWN = 0,
+    ENP_CAP_STATE_CALIBRATING = 1,
+    ENP_CAP_STATE_NAVIGATING = 2,
+    ENP_CAP_STATE_ERROR = 3,
+} enp_cap_state_t;
+
+/** Common attribute type IDs. */
+typedef enum enp_attribute_type {
+    ENP_ATTRIBUTE_TYPE_TEXT_UTF8 = 1,
+} enp_attribute_type_t;
 
 /** Optional TLV attribute descriptor (host representation). */
 typedef struct enp_attribute {
@@ -96,6 +110,18 @@ typedef struct enp_cap_direction_request_header {
     uint32_t reserved0;
     uint32_t reserved1;
 } enp_cap_direction_request_header_t;
+
+/** CAP_STATE message-specific header (host representation). */
+typedef struct enp_cap_state_header {
+    uint32_t state;
+    uint32_t reserved;
+} enp_cap_state_header_t;
+
+/** DEBUG_LOG message-specific header (host representation). */
+typedef struct enp_debug_log_header {
+    uint32_t severity;
+    uint32_t reserved;
+} enp_debug_log_header_t;
 
 /** Returns encoded TLV size (type + length + payload) for one attribute. */
 static inline size_t enp_attribute_encoded_size(uint16_t payload_size) {
