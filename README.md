@@ -29,3 +29,12 @@ After these phases, heading updates run normally and direction LEDs indicate nav
 - If calibration fails or heading feels unstable, reboot and repeat the process.
 - During any **steady all-LED ON** phase: keep the cap stationary.
 - During **blinking all-LED** phase: move the cap actively for calibration.
+
+## Error indication
+
+If calibration quality checks fail, firmware calls `indicate_fault_all_leds()`, which lights **all direction LEDs steadily for 5 seconds** and then turns them off.
+
+What this means for the user:
+- A required calibration step did not gather enough valid data, or computed scaling was invalid.
+- Reboot and repeat calibration.
+- During steady-ON phases keep the cap still; during blinking phase move the cap broadly in figure-8 and full rotations.
