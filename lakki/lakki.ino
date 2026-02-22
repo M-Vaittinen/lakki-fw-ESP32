@@ -133,10 +133,21 @@ static float g_mag_max_z;
 static float g_mag_off_x;
 static float g_mag_off_y;
 static float g_mag_off_z;
+static float g_mag_scale_x = 1.0f;
+static float g_mag_scale_y = 1.0f;
+static float g_mag_scale_z = 1.0f;
 
-#define MAG_CAL_TIMEOUT_MS 12000U
-#define MAG_CAL_MAX_SAMPLES 12000U
+#define MAG_CAL_TIMEOUT_MS 18000U
+#define MAG_CAL_MAX_SAMPLES 18000U
 #define MAG_CAL_MIN_SAMPLES 200U
+#define MAG_CAL_MIN_HALF_RANGE 1.0e-3f
+
+static bool has_sane_mag_scaling(float rx, float ry, float rz)
+{
+  return rx > MAG_CAL_MIN_HALF_RANGE &&
+         ry > MAG_CAL_MIN_HALF_RANGE &&
+         rz > MAG_CAL_MIN_HALF_RANGE;
+}
 
 static int apply_declination_deg(int dir)
 {
@@ -259,7 +270,6 @@ static void calibrate_magnetometer()
 
   g_mag_min_x = g_mag_min_y = g_mag_min_z = INFINITY;
   g_mag_max_x = g_mag_max_y = g_mag_max_z = -INFINITY;
-  g_mag_off_x = g_mag_off_y = g_mag_off_z = 0.0f;
 
   Serial.println("[CAL] Magnetometer calibration start");
   Serial.println("[CAL] Move cap in figure-8 and full rotations...");
@@ -313,15 +323,38 @@ static void calibrate_magnetometer()
     return;
   }
 
+  const float rx = (g_mag_max_x - g_mag_min_x) * 0.5f;
+  const float ry = (g_mag_max_y - g_mag_min_y) * 0.5f;
+  const float rz = (g_mag_max_z - g_mag_min_z) * 0.5f;
+
+  if (!has_sane_mag_scaling(rx, ry, rz)) {
+    Serial.printf("[CAL] Invalid ranges rx=%.6f ry=%.6f rz=%.6f, keeping previous calibration\n", rx, ry, rz);
+    indicate_fault_all_leds();
+    return;
+  }
+
+  const float r_avg = (rx + ry + rz) / 3.0f;
+
   g_mag_off_x = (g_mag_max_x + g_mag_min_x) * 0.5f;
   g_mag_off_y = (g_mag_max_y + g_mag_min_y) * 0.5f;
   g_mag_off_z = (g_mag_max_z + g_mag_min_z) * 0.5f;
+  g_mag_scale_x = r_avg / rx;
+  g_mag_scale_y = r_avg / ry;
+  g_mag_scale_z = r_avg / rz;
+
+  if (!has_sane_mag_scaling(g_mag_scale_x, g_mag_scale_y, g_mag_scale_z)) {
+    Serial.println("[CAL] Invalid computed scales, keeping previous calibration");
+    indicate_fault_all_leds();
+    return;
+  }
 
   Serial.printf("[CAL] done samples=%lu duration=%lums\n", samples, millis() - start_ms);
   Serial.printf("[CAL] min=(%.2f, %.2f, %.2f) max=(%.2f, %.2f, %.2f)\n",
                 g_mag_min_x, g_mag_min_y, g_mag_min_z,
                 g_mag_max_x, g_mag_max_y, g_mag_max_z);
   Serial.printf("[CAL] offsets=(%.2f, %.2f, %.2f)\n", g_mag_off_x, g_mag_off_y, g_mag_off_z);
+  Serial.printf("[CAL] half-ranges=(%.3f, %.3f, %.3f) avg=%.3f\n", rx, ry, rz, r_avg);
+  Serial.printf("[CAL] scales=(%.3f, %.3f, %.3f)\n", g_mag_scale_x, g_mag_scale_y, g_mag_scale_z);
 }
 
 static void update_heading()
@@ -342,9 +375,9 @@ static void update_heading()
   const float mx = g_icm.magX();
   const float my = g_icm.magY();
   const float mz = g_icm.magZ();
-  const float mx_c = mx - g_mag_off_x;
-  const float my_c = my - g_mag_off_y;
-  const float mz_c = mz - g_mag_off_z;
+  const float mx_n = (mx - g_mag_off_x) * g_mag_scale_x;
+  const float my_n = (my - g_mag_off_y) * g_mag_scale_y;
+  const float mz_n = (mz - g_mag_off_z) * g_mag_scale_z;
 
   const uint32_t now = millis();
   float dt = (now - g_last_heading_ms) / 1000.0f;
@@ -363,8 +396,8 @@ static void update_heading()
   const float sin_pitch = sinf(g_pitch_rad);
   const float cos_pitch = cosf(g_pitch_rad);
 
-  const float mag_x_h = mx_c * cos_pitch + mz_c * sin_pitch;
-  const float mag_y_h = mx_c * sin_roll * sin_pitch + my_c * cos_roll - mz_c * sin_roll * cos_pitch;
+  const float mag_x_h = mx_n * cos_pitch + mz_n * sin_pitch;
+  const float mag_y_h = mx_n * sin_roll * sin_pitch + my_n * cos_roll - mz_n * sin_roll * cos_pitch;
 
   float heading = atan2f(-mag_x_h, mag_y_h);
   if (heading < 0.0f)
