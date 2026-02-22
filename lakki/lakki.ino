@@ -124,6 +124,10 @@ static bool g_icm_ready;
 static float g_roll_rad;
 static float g_pitch_rad;
 static uint32_t g_last_heading_ms;
+static float g_gyr_bias_x;
+static float g_gyr_bias_y;
+static float g_gyr_bias_z;
+static bool g_heading_init_done;
 static float g_mag_min_x;
 static float g_mag_min_y;
 static float g_mag_min_z;
@@ -141,6 +145,11 @@ static float g_mag_scale_z = 1.0f;
 #define MAG_CAL_MAX_SAMPLES 18000U
 #define MAG_CAL_MIN_SAMPLES 200U
 #define MAG_CAL_MIN_HALF_RANGE 1.0e-3f
+#define IMU_INIT_TIMEOUT_MS 2000U
+#define IMU_INIT_MIN_SAMPLES 60U
+#define CAL_STATE_SWITCH_DELAY_MS 1500U
+
+static void set_all_dir_leds(bool on);
 
 static bool has_sane_mag_scaling(float rx, float ry, float rz)
 {
@@ -234,10 +243,56 @@ static bool setup_compass()
     return false;
   }
 
+  Serial.println("[ICM] Keep cap stationary, collecting gyro/accel baseline...");
+  set_all_dir_leds(true);
+
+  float acc_roll_sum = 0.0f;
+  float acc_pitch_sum = 0.0f;
+  float gyr_x_sum = 0.0f;
+  float gyr_y_sum = 0.0f;
+  float gyr_z_sum = 0.0f;
+  uint32_t sample_count = 0;
+  const uint32_t init_start_ms = millis();
+
+  while ((millis() - init_start_ms) < IMU_INIT_TIMEOUT_MS) {
+    if (!g_icm.dataReady()) {
+      delay(2);
+      continue;
+    }
+
+    g_icm.getAGMT();
+
+    const float ax = g_icm.accX();
+    const float ay = g_icm.accY();
+    const float az = g_icm.accZ();
+
+    acc_roll_sum += atan2(ay, az);
+    acc_pitch_sum += atan2(-ax, sqrtf((ay * ay) + (az * az)));
+    gyr_x_sum += g_icm.gyrX() * DEG_TO_RAD;
+    gyr_y_sum += g_icm.gyrY() * DEG_TO_RAD;
+    gyr_z_sum += g_icm.gyrZ() * DEG_TO_RAD;
+
+    sample_count++;
+  }
+
+  set_all_dir_leds(false);
+
+  if (sample_count < IMU_INIT_MIN_SAMPLES) {
+    Serial.printf("[ICM] Baseline init failed: only %lu samples\n", sample_count);
+    return false;
+  }
+
+  g_roll_rad = acc_roll_sum / sample_count;
+  g_pitch_rad = acc_pitch_sum / sample_count;
+  g_gyr_bias_x = gyr_x_sum / sample_count;
+  g_gyr_bias_y = gyr_y_sum / sample_count;
+  g_gyr_bias_z = gyr_z_sum / sample_count;
+  g_heading_init_done = true;
+
   Serial.println("[ICM] Compass ready");
+  Serial.printf("[ICM] Init samples=%lu, gyro bias(rad/s)=%.5f, %.5f, %.5f\n",
+                sample_count, g_gyr_bias_x, g_gyr_bias_y, g_gyr_bias_z);
   g_last_heading_ms = millis();
-  g_roll_rad = 0.0f;
-  g_pitch_rad = 0.0f;
 
   return true;
 }
@@ -272,6 +327,12 @@ static void calibrate_magnetometer()
   g_mag_max_x = g_mag_max_y = g_mag_max_z = -INFINITY;
 
   Serial.println("[CAL] Magnetometer calibration start");
+  Serial.printf("[CAL] Hold still, calibration mode switches in %u ms...\n", CAL_STATE_SWITCH_DELAY_MS);
+  set_all_dir_leds(true);
+  delay(CAL_STATE_SWITCH_DELAY_MS);
+  set_all_dir_leds(false);
+
+  Serial.println("[CAL] Move cap now");
   Serial.println("[CAL] Move cap in figure-8 and full rotations...");
 
   while ((millis() - start_ms) < MAG_CAL_TIMEOUT_MS && samples < MAG_CAL_MAX_SAMPLES) {
@@ -362,6 +423,9 @@ static void update_heading()
   if (!g_icm_ready)
     return;
 
+  if (!g_heading_init_done)
+    return;
+
   if (!g_icm.dataReady())
     return;
 
@@ -370,8 +434,8 @@ static void update_heading()
   const float ax = g_icm.accX();
   const float ay = g_icm.accY();
   const float az = g_icm.accZ();
-  const float gx = g_icm.gyrX() * DEG_TO_RAD;
-  const float gy = g_icm.gyrY() * DEG_TO_RAD;
+  const float gx = g_icm.gyrX() * DEG_TO_RAD - g_gyr_bias_x;
+  const float gy = g_icm.gyrY() * DEG_TO_RAD - g_gyr_bias_y;
   const float mx = g_icm.magX();
   const float my = g_icm.magY();
   const float mz = g_icm.magZ();
