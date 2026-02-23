@@ -197,6 +197,8 @@ static size_t append_text_attr(uint8_t *buf, size_t max_len, const char *text)
 {
   size_t text_len;
   uint16_t attr_len;
+  uint16_t be_attr_type;
+  uint16_t be_attr_len;
 
   if (!text || !text[0] || max_len < 4)
     return 0;
@@ -206,8 +208,8 @@ static size_t append_text_attr(uint8_t *buf, size_t max_len, const char *text)
     text_len = max_len - 4;
 
   attr_len = (uint16_t)(4 + text_len);
-  uint16_t be_attr_type = tobe16((uint16_t)ENP_ATTRIBUTE_TYPE_TEXT_UTF8);
-  uint16_t be_attr_len = tobe16(attr_len);
+  be_attr_type = tobe16((uint16_t)ENP_ATTRIBUTE_TYPE_TEXT_UTF8);
+  be_attr_len = tobe16(attr_len);
 
   memcpy(&buf[0], &be_attr_type, sizeof(be_attr_type));
   memcpy(&buf[2], &be_attr_len, sizeof(be_attr_len));
@@ -223,7 +225,7 @@ static void cap_state_send(enp_cap_state_t state, const char *info)
   struct msg_header *hdr = (struct msg_header *)msg;
   enp_cap_state_header_t *state_hdr = (enp_cap_state_header_t *)(msg + sizeof(*hdr));
 
-  payload_len = append_text_attr(msg + sizeof(*hdr) + sizeof(*state_hdr),
+  payload_len = append_text_attr(MSG_PAYLOAD(hdr) + sizeof(*state_hdr),
                                  sizeof(msg) - sizeof(*hdr) - sizeof(*state_hdr),
                                  info);
 
@@ -251,7 +253,7 @@ static void debug_log_send(uint32_t severity, const char *line)
   struct msg_header *hdr = (struct msg_header *)msg;
   enp_debug_log_header_t *dbg_hdr = (enp_debug_log_header_t *)(msg + sizeof(*hdr));
 
-  payload_len = append_text_attr(msg + sizeof(*hdr) + sizeof(*dbg_hdr),
+  payload_len = append_text_attr(MSG_PAYLOAD(hdr) + sizeof(*dbg_hdr),
                                  sizeof(msg) - sizeof(*hdr) - sizeof(*dbg_hdr),
                                  line);
 
@@ -454,7 +456,7 @@ static void calibrate_magnetometer()
   g_mag_min_x = g_mag_min_y = g_mag_min_z = INFINITY;
   g_mag_max_x = g_mag_max_y = g_mag_max_z = -INFINITY;
 
-  cap_state_set(ENP_CAP_STATE_CALIBRATING, 0);
+  cap_state_set(ENP_CAP_STATE_CALIBRATING, NULL);
   Serial.println("[CAL] Magnetometer calibration start");
   Serial.printf("[CAL] Hold still, calibration mode switches in %u ms...\n", CAL_STATE_SWITCH_DELAY_MS);
   set_all_dir_leds(true);
@@ -548,7 +550,7 @@ static void calibrate_magnetometer()
   Serial.printf("[CAL] offsets=(%.2f, %.2f, %.2f)\n", g_mag_off_x, g_mag_off_y, g_mag_off_z);
   Serial.printf("[CAL] half-ranges=(%.3f, %.3f, %.3f) avg=%.3f\n", rx, ry, rz, r_avg);
   Serial.printf("[CAL] scales=(%.3f, %.3f, %.3f)\n", g_mag_scale_x, g_mag_scale_y, g_mag_scale_z);
-  cap_state_set(ENP_CAP_STATE_NAVIGATING, 0);
+  cap_state_set(ENP_CAP_STATE_NAVIGATING, NULL);
 }
 
 static void update_heading()
@@ -830,10 +832,6 @@ void setup() {
   Serial.println("[SYS] Boot");
 
   setup_led_gpios();
-  g_icm_ready = setup_compass();
-  if (!g_icm_ready)
-    cap_state_set(ENP_CAP_STATE_ERROR, "Compass setup failed");
-  calibrate_magnetometer();
 
   BLEDevice::init("LakkiCap");
 
@@ -858,6 +856,11 @@ void setup() {
 
   pService->start();
   setupAdvertising();
+
+  g_icm_ready = setup_compass();
+  if (!g_icm_ready)
+    cap_state_set(ENP_CAP_STATE_ERROR, "Compass setup failed");
+  calibrate_magnetometer();
 }
 
 static bool is_leds_off_set()
