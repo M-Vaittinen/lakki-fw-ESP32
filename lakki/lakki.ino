@@ -19,6 +19,9 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <Wire.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 #include "ICM_20948.h"
 
 #include "external_navigation_protocol.h"
@@ -27,6 +30,7 @@
 
 
 static const int debug = 0;
+#define ENABLE_BLE_DIRECTION_DEBUG 0
 
 /*
  * Let's agree that the direction where the cap points at, is 0.
@@ -103,6 +107,19 @@ uint32_t swap32(uint32_t orig)
          ((orig & 0x0000FF00) << 8) | ((orig & 0x000000FF) << 24);  
 }
 
+uint16_t swap16(uint16_t orig)
+{
+  return (uint16_t)(((orig & 0xFF00u) >> 8) | ((orig & 0x00FFu) << 8));
+}
+
+uint16_t tobe16(uint16_t orig)
+{
+  if (hiawatha())
+      return swap16(orig);
+
+  return orig;
+}
+
 uint32_t tobe32(uint32_t orig)
 {
   if (hiawatha())
@@ -140,6 +157,7 @@ static float g_mag_off_z;
 static float g_mag_scale_x = 1.0f;
 static float g_mag_scale_y = 1.0f;
 static float g_mag_scale_z = 1.0f;
+static enp_cap_state_t g_cap_state = ENP_CAP_STATE_UNKNOWN;
 
 #define MAG_CAL_TIMEOUT_MS 18000U
 #define MAG_CAL_MAX_SAMPLES 18000U
@@ -150,6 +168,115 @@ static float g_mag_scale_z = 1.0f;
 #define CAL_STATE_SWITCH_DELAY_MS 1500U
 
 static void set_all_dir_leds(bool on);
+
+// Matches app/src/main/java/com/example/lakki_phone/bluetooth/BleGattClient.kt
+static BLEUUID SERVICE_UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+static BLEUUID RX_CHAR_UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"); // phone -> cap (WRITE)
+static BLEUUID TX_CHAR_UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"); // cap -> phone (NOTIFY)
+
+BLEServer* pServer = nullptr;
+BLEService* pService = nullptr;
+BLECharacteristic* pRxCharacteristic = nullptr;
+BLECharacteristic* pTxCharacteristic = nullptr;
+
+volatile bool deviceConnected = false;
+volatile bool previouslyConnected = false;
+
+
+void msg_send(void *msg, unsigned int size)
+{
+  /* This is not atomic... */
+  if (!deviceConnected)
+    return;
+  //Serial.printf("Sending msg %p, %u\n", msg, size);
+  pTxCharacteristic->setValue((uint8_t *)msg, size);
+  pTxCharacteristic->notify();
+}
+
+static size_t append_text_attr(uint8_t *buf, size_t max_len, const char *text)
+{
+  size_t text_len;
+  uint16_t attr_len;
+  uint16_t be_attr_type;
+  uint16_t be_attr_len;
+
+  if (!text || !text[0] || max_len < 4)
+    return 0;
+
+  text_len = strlen(text);
+  if (text_len > (max_len - 4))
+    text_len = max_len - 4;
+
+  attr_len = (uint16_t)(4 + text_len);
+  be_attr_type = tobe16((uint16_t)ENP_ATTRIBUTE_TYPE_TEXT_UTF8);
+  be_attr_len = tobe16(attr_len);
+
+  memcpy(&buf[0], &be_attr_type, sizeof(be_attr_type));
+  memcpy(&buf[2], &be_attr_len, sizeof(be_attr_len));
+  memcpy(&buf[4], text, text_len);
+
+  return attr_len;
+}
+
+static void cap_state_send(enp_cap_state_t state, const char *info)
+{
+  uint8_t msg[192] = {0};
+  size_t payload_len = 0;
+  struct msg_header *hdr = (struct msg_header *)msg;
+  enp_cap_state_header_t *state_hdr = (enp_cap_state_header_t *)(msg + sizeof(*hdr));
+
+  payload_len = append_text_attr(MSG_PAYLOAD(hdr) + sizeof(*state_hdr),
+                                 sizeof(msg) - sizeof(*hdr) - sizeof(*state_hdr),
+                                 info);
+
+  hdr->type = tobe32(ENP_MESSAGE_TYPE_CAP_STATE);
+  hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*state_hdr) + payload_len));
+  state_hdr->state = tobe32((uint32_t)state);
+  state_hdr->reserved = 0;
+
+  msg_send(msg, sizeof(*hdr) + sizeof(*state_hdr) + payload_len);
+}
+
+static void cap_state_set(enp_cap_state_t state, const char *info)
+{
+  if (g_cap_state == state && (!info || !info[0]))
+    return;
+
+  g_cap_state = state;
+  cap_state_send(state, info);
+}
+
+static void debug_log_send(uint32_t severity, const char *line)
+{
+  uint8_t msg[192] = {0};
+  size_t payload_len = 0;
+  struct msg_header *hdr = (struct msg_header *)msg;
+  enp_debug_log_header_t *dbg_hdr = (enp_debug_log_header_t *)(msg + sizeof(*hdr));
+
+  payload_len = append_text_attr(MSG_PAYLOAD(hdr) + sizeof(*dbg_hdr),
+                                 sizeof(msg) - sizeof(*hdr) - sizeof(*dbg_hdr),
+                                 line);
+
+  hdr->type = tobe32(ENP_MESSAGE_TYPE_DEBUG_LOG);
+  hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len));
+  dbg_hdr->severity = tobe32(severity);
+  dbg_hdr->reserved = 0;
+
+  msg_send(msg, sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len);
+}
+
+static void ble_debug_logf(const char *fmt, ...)
+{
+  char line[160];
+  va_list args;
+
+  va_start(args, fmt);
+  vsnprintf(line, sizeof(line), fmt, args);
+  va_end(args);
+
+  debug_log_send(0, line);
+}
+
 
 static bool has_sane_mag_scaling(float rx, float ry, float rz)
 {
@@ -215,6 +342,7 @@ static bool setup_compass()
   if (!initialized) {
     Serial.print("[ICM] Init failed: ");
     Serial.println(g_icm.statusString());
+    cap_state_set(ENP_CAP_STATE_ERROR, "ICM init failed");
     return false;
   }
 
@@ -240,6 +368,7 @@ static bool setup_compass()
   if (g_icm.status != ICM_20948_Stat_Ok) {
     Serial.print("[ICM] Magnetometer startup failed: ");
     Serial.println(g_icm.statusString());
+    cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer startup failed");
     return false;
   }
 
@@ -279,6 +408,7 @@ static bool setup_compass()
 
   if (sample_count < IMU_INIT_MIN_SAMPLES) {
     Serial.printf("[ICM] Baseline init failed: only %lu samples\n", sample_count);
+    cap_state_set(ENP_CAP_STATE_ERROR, "IMU baseline initialization failed");
     return false;
   }
 
@@ -326,6 +456,7 @@ static void calibrate_magnetometer()
   g_mag_min_x = g_mag_min_y = g_mag_min_z = INFINITY;
   g_mag_max_x = g_mag_max_y = g_mag_max_z = -INFINITY;
 
+  cap_state_set(ENP_CAP_STATE_CALIBRATING, NULL);
   Serial.println("[CAL] Magnetometer calibration start");
   Serial.printf("[CAL] Hold still, calibration mode switches in %u ms...\n", CAL_STATE_SWITCH_DELAY_MS);
   set_all_dir_leds(true);
@@ -380,6 +511,7 @@ static void calibrate_magnetometer()
 
   if (samples < MAG_CAL_MIN_SAMPLES) {
     Serial.printf("[CAL] Warning: only %lu samples, calibration weak. Offsets left at 0.\n", samples);
+    cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer calibration had too few samples");
     indicate_fault_all_leds();
     return;
   }
@@ -390,6 +522,7 @@ static void calibrate_magnetometer()
 
   if (!has_sane_mag_scaling(rx, ry, rz)) {
     Serial.printf("[CAL] Invalid ranges rx=%.6f ry=%.6f rz=%.6f, keeping previous calibration\n", rx, ry, rz);
+    cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer calibration failed due to invalid ranges");
     indicate_fault_all_leds();
     return;
   }
@@ -405,6 +538,7 @@ static void calibrate_magnetometer()
 
   if (!has_sane_mag_scaling(g_mag_scale_x, g_mag_scale_y, g_mag_scale_z)) {
     Serial.println("[CAL] Invalid computed scales, keeping previous calibration");
+    cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer calibration failed due to invalid scales");
     indicate_fault_all_leds();
     return;
   }
@@ -416,6 +550,7 @@ static void calibrate_magnetometer()
   Serial.printf("[CAL] offsets=(%.2f, %.2f, %.2f)\n", g_mag_off_x, g_mag_off_y, g_mag_off_z);
   Serial.printf("[CAL] half-ranges=(%.3f, %.3f, %.3f) avg=%.3f\n", rx, ry, rz, r_avg);
   Serial.printf("[CAL] scales=(%.3f, %.3f, %.3f)\n", g_mag_scale_x, g_mag_scale_y, g_mag_scale_z);
+  cap_state_set(ENP_CAP_STATE_NAVIGATING, NULL);
 }
 
 static void update_heading()
@@ -474,19 +609,6 @@ static void update_heading()
                   g_roll_rad * RAD_TO_DEG, g_pitch_rad * RAD_TO_DEG);
   }
 }
-
-// Matches app/src/main/java/com/example/lakki_phone/bluetooth/BleGattClient.kt
-static BLEUUID SERVICE_UUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
-static BLEUUID RX_CHAR_UUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E"); // phone -> cap (WRITE)
-static BLEUUID TX_CHAR_UUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E"); // cap -> phone (NOTIFY)
-
-BLEServer* pServer = nullptr;
-BLEService* pService = nullptr;
-BLECharacteristic* pRxCharacteristic = nullptr;
-BLECharacteristic* pTxCharacteristic = nullptr;
-
-volatile bool deviceConnected = false;
-volatile bool previouslyConnected = false;
 
 class CapServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* server) override {
@@ -665,16 +787,6 @@ out_handled:
   }
 };
 
-void msg_send(void *msg, unsigned int size)
-{
-  /* This is not atomic... */
-  if (!deviceConnected)
-    return;
-  //Serial.printf("Sending msg %p, %u\n", msg, size);
-  pTxCharacteristic->setValue((uint8_t *)msg, size);
-  pTxCharacteristic->notify();
-}
-
 void setupAdvertising() {
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
   advertising->addServiceUUID(SERVICE_UUID);
@@ -720,8 +832,6 @@ void setup() {
   Serial.println("[SYS] Boot");
 
   setup_led_gpios();
-  g_icm_ready = setup_compass();
-  calibrate_magnetometer();
 
   BLEDevice::init("LakkiCap");
 
@@ -746,6 +856,11 @@ void setup() {
 
   pService->start();
   setupAdvertising();
+
+  g_icm_ready = setup_compass();
+  if (!g_icm_ready)
+    cap_state_set(ENP_CAP_STATE_ERROR, "Compass setup failed");
+  calibrate_magnetometer();
 }
 
 static bool is_leds_off_set()
@@ -877,6 +992,17 @@ static void state_machine()
   if (is_cap_dir_send_en()) {
     cap_dir_send();
   }
+#if ENABLE_BLE_DIRECTION_DEBUG
+  {
+    static uint32_t lastDbgMs = 0;
+    uint32_t now = millis();
+
+    if ((now - lastDbgMs) >= 1000) {
+      lastDbgMs = now;
+      ble_debug_logf("cap direction: %u deg", g_direction);
+    }
+  }
+#endif
 }
 
 void loop() {
