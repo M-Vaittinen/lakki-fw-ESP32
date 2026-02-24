@@ -30,7 +30,7 @@
 
 
 static const int debug = 0;
-#define ENABLE_BLE_DIRECTION_DEBUG 0
+#define ENABLE_BLE_DIRECTION_DEBUG 1
 
 /*
  * Let's agree that the direction where the cap points at, is 0.
@@ -185,35 +185,44 @@ volatile bool previouslyConnected = false;
 
 void msg_send(void *msg, unsigned int size)
 {
+  int i;
+
   /* This is not atomic... */
   if (!deviceConnected)
     return;
   //Serial.printf("Sending msg %p, %u\n", msg, size);
+  Serial.printf("Sending:");
+
+  for (i = 0; i < size; i++) {
+    Serial.printf(" 0x%02x", *(((uint8_t *)msg) + i));
+  }
+
+  Serial.printf("\n");
+
   pTxCharacteristic->setValue((uint8_t *)msg, size);
   pTxCharacteristic->notify();
 }
 
-static size_t append_text_attr(uint8_t *buf, size_t max_len, const char *text)
+static size_t append_text_attr(struct enp_attribute *attrhdr, size_t max_len, const char *text)
 {
   size_t text_len;
   uint16_t attr_len;
   uint16_t be_attr_type;
   uint16_t be_attr_len;
+  void *attr_payload = ATTR_PAYLOAD(attrhdr);
 
-  if (!text || !text[0] || max_len < 4)
+  if (!text || !text[0] || max_len < sizeof(*attrhdr))
     return 0;
 
   text_len = strlen(text);
-  if (text_len > (max_len - 4))
-    text_len = max_len - 4;
+  if (text_len > (max_len - sizeof(*attrhdr)))
+    text_len = max_len - sizeof(*attrhdr);
 
-  attr_len = (uint16_t)(4 + text_len);
-  be_attr_type = tobe16((uint16_t)ENP_ATTRIBUTE_TYPE_TEXT_UTF8);
-  be_attr_len = tobe16(attr_len);
+  attr_len = (uint16_t)(sizeof(enp_attribute) + text_len);
+  attrhdr->type = tobe16((uint16_t)ENP_ATTRIBUTE_TYPE_TEXT_UTF8);
+  attrhdr->attr_size = tobe16(attr_len);
 
-  memcpy(&buf[0], &be_attr_type, sizeof(be_attr_type));
-  memcpy(&buf[2], &be_attr_len, sizeof(be_attr_len));
-  memcpy(&buf[4], text, text_len);
+  memcpy(attr_payload, text, text_len);
 
   return attr_len;
 }
@@ -223,16 +232,20 @@ static void cap_state_send(enp_cap_state_t state, const char *info)
   uint8_t msg[192] = {0};
   size_t payload_len = 0;
   struct msg_header *hdr = (struct msg_header *)msg;
-  enp_cap_state_header_t *state_hdr = (enp_cap_state_header_t *)(msg + sizeof(*hdr));
+  enp_cap_state_header_t *state_hdr = (enp_cap_state_header_t *)MSG_PAYLOAD(hdr);
+  struct enp_attribute *attr_hdr = (struct enp_attribute *)STATE_MSG_PAYLOAD(state_hdr);
 
-  payload_len = append_text_attr(MSG_PAYLOAD(hdr) + sizeof(*state_hdr),
-                                 sizeof(msg) - sizeof(*hdr) - sizeof(*state_hdr),
-                                 info);
+  payload_len = append_text_attr(attr_hdr, sizeof(msg) - sizeof(*hdr) -
+                                 sizeof(*state_hdr), info);
 
   hdr->type = tobe32(ENP_MESSAGE_TYPE_CAP_STATE);
   hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*state_hdr) + payload_len));
   state_hdr->state = tobe32((uint32_t)state);
   state_hdr->reserved = 0;
+
+  Serial.printf("Sending cap state: %u\n", state);
+  if (info)
+    Serial.printf("State-info: %s\n", info);
 
   msg_send(msg, sizeof(*hdr) + sizeof(*state_hdr) + payload_len);
 }
@@ -251,16 +264,21 @@ static void debug_log_send(uint32_t severity, const char *line)
   uint8_t msg[192] = {0};
   size_t payload_len = 0;
   struct msg_header *hdr = (struct msg_header *)msg;
-  enp_debug_log_header_t *dbg_hdr = (enp_debug_log_header_t *)(msg + sizeof(*hdr));
+  enp_debug_log_header_t *dbg_hdr = (enp_debug_log_header_t *)MSG_PAYLOAD(msg);
+  struct enp_attribute *attr_hdr = (struct enp_attribute *)DBG_MSG_PAYLOAD(dbg_hdr);
 
-  payload_len = append_text_attr(MSG_PAYLOAD(hdr) + sizeof(*dbg_hdr),
-                                 sizeof(msg) - sizeof(*hdr) - sizeof(*dbg_hdr),
-                                 line);
+  payload_len = append_text_attr(attr_hdr, sizeof(msg) - sizeof(*hdr) -
+                                 sizeof(*dbg_hdr), line);
+
+  if (!payload_len)
+    return;
 
   hdr->type = tobe32(ENP_MESSAGE_TYPE_DEBUG_LOG);
   hdr->msg_len = tobe32((uint32_t)(sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len));
   dbg_hdr->severity = tobe32(severity);
   dbg_hdr->reserved = 0;
+
+  Serial.printf("Sending debug-log msg: %s\n", line);
 
   msg_send(msg, sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len);
 }
