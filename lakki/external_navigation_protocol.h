@@ -32,9 +32,6 @@ extern "C" {
 #define ENP_ATTRIBUTE_TYPE_SIZE_BYTES 2u
 #define ENP_ATTRIBUTE_LENGTH_SIZE_BYTES 2u
 
-/** Current fixed header size used by all defined message types. */
-#define ENP_FIXED_HEADER_SIZE_BYTES 8u
-
 /** Message type IDs. */
 typedef enum enp_message_type {
     ENP_MESSAGE_TYPE_INVALID = 0,
@@ -54,7 +51,6 @@ struct msg_header {
 	uint32_t msg_len;
 };
 
-#define MSG_PAYLOAD(hdr) (((uint8_t *)(hdr)) + sizeof(msg_header))
 /** CAP operational state enum used in CAP_STATE messages. */
 typedef enum enp_cap_state {
     ENP_CAP_STATE_UNKNOWN = 0,
@@ -68,12 +64,13 @@ typedef enum enp_attribute_type {
     ENP_ATTRIBUTE_TYPE_TEXT_UTF8 = 1,
 } enp_attribute_type_t;
 
-/** Optional TLV attribute descriptor (host representation). */
+/** Optional TLV attribute header. */
 typedef struct enp_attribute {
     uint16_t type;
-    const uint8_t* payload;
-    uint16_t payload_size;
+    uint16_t attr_size;
 } enp_attribute_t;
+
+#define ATTR_PAYLOAD(attr) (((uint8_t *)(attr)) + sizeof(enp_attribute))
 
 /** HANDSHAKE message-specific header (host representation). */
 typedef struct enp_handshake_header {
@@ -125,18 +122,25 @@ typedef struct enp_debug_log_header {
 
 /** Returns encoded TLV size (type + length + payload) for one attribute. */
 static inline size_t enp_attribute_encoded_size(uint16_t payload_size) {
-    return (size_t)ENP_ATTRIBUTE_TYPE_SIZE_BYTES +
-           (size_t)ENP_ATTRIBUTE_LENGTH_SIZE_BYTES +
-           (size_t)payload_size;
+    return sizeof(enp_attribute) + (size_t)payload_size;
 }
 
-/** Returns total encoded message size for 8-byte message-specific headers. */
-static inline size_t enp_message_encoded_size(size_t attributes_total_size) {
-    return (size_t)ENP_MESSAGE_TYPE_SIZE_BYTES +
-           (size_t)ENP_MESSAGE_LENGTH_SIZE_BYTES +
-           (size_t)ENP_FIXED_HEADER_SIZE_BYTES +
-           attributes_total_size;
+/** Returns total encoded message size. */
+static inline size_t enp_message_encoded_size(size_t msg_specific_hdr_size, size_t attributes_total_size) {
+    return sizeof(msg_header) + msg_specific_hdr_size + attributes_total_size;
 }
+
+#define MSG_PAYLOAD(hdr) (((uint8_t *)(hdr)) + sizeof(msg_header))
+static inline void * STATE_MSG_PAYLOAD(enp_cap_state_header *state_msg_hdr)
+{
+	return ((uint8_t *)state_msg_hdr) + sizeof(*state_msg_hdr);
+}
+
+static inline void * DBG_MSG_PAYLOAD(enp_debug_log_header *dbg_msg_hdr)
+{
+	return ((uint8_t *)dbg_msg_hdr) + sizeof(*dbg_msg_hdr);
+}
+
 
 #ifdef __cplusplus
 }
