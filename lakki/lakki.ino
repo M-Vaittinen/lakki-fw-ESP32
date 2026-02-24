@@ -28,6 +28,17 @@
 
 #define LED_IND_LOOPS 1000;
 
+#define SERIAL_PRINTS
+
+#ifdef SERIAL_PRINTS
+  #define DEBUG_PRINTF Serial.printf
+  #define DEBUG_PRINT Serial.print
+  #define DEBUG_PRINTLN Serial.println
+#else
+  #define DEBUG_PRINTF(...)
+  #define DEBUG_PRINTLN(...)
+  #define DEBUG_PRINT(...)
+#endif
 
 static const int debug = 0;
 #define ENABLE_BLE_DIRECTION_DEBUG 1
@@ -191,13 +202,13 @@ void msg_send(void *msg, unsigned int size)
   if (!deviceConnected)
     return;
   //Serial.printf("Sending msg %p, %u\n", msg, size);
-  Serial.printf("Sending:");
+  DEBUG_PRINTF("Sending:");
 
   for (i = 0; i < size; i++) {
-    Serial.printf(" 0x%02x", *(((uint8_t *)msg) + i));
+    DEBUG_PRINTF(" 0x%02x", *(((uint8_t *)msg) + i));
   }
 
-  Serial.printf("\n");
+  DEBUG_PRINTF("\n");
 
   pTxCharacteristic->setValue((uint8_t *)msg, size);
   pTxCharacteristic->notify();
@@ -243,9 +254,9 @@ static void cap_state_send(enp_cap_state_t state, const char *info)
   state_hdr->state = tobe32((uint32_t)state);
   state_hdr->reserved = 0;
 
-  Serial.printf("Sending cap state: %u\n", state);
+  DEBUG_PRINTF("Sending cap state: %u\n", state);
   if (info)
-    Serial.printf("State-info: %s\n", info);
+    DEBUG_PRINTF("State-info: %s\n", info);
 
   msg_send(msg, sizeof(*hdr) + sizeof(*state_hdr) + payload_len);
 }
@@ -278,7 +289,7 @@ static void debug_log_send(uint32_t severity, const char *line)
   dbg_hdr->severity = tobe32(severity);
   dbg_hdr->reserved = 0;
 
-  Serial.printf("Sending debug-log msg: %s\n", line);
+  DEBUG_PRINTF("Sending debug-log msg: %s\n", line);
 
   msg_send(msg, sizeof(*hdr) + sizeof(*dbg_hdr) + payload_len);
 }
@@ -346,6 +357,8 @@ static bool setup_compass()
 {
   bool initialized = false;
 
+  ble_debug_logf("Elä liikuta!");
+
   WIRE_PORT.begin();
   WIRE_PORT.setClock(400000);
 
@@ -358,8 +371,8 @@ static bool setup_compass()
   }
 
   if (!initialized) {
-    Serial.print("[ICM] Init failed: ");
-    Serial.println(g_icm.statusString());
+    DEBUG_PRINT("[ICM] Init failed: ");
+    DEBUG_PRINTLN(g_icm.statusString());
     cap_state_set(ENP_CAP_STATE_ERROR, "ICM init failed");
     return false;
   }
@@ -384,13 +397,13 @@ static bool setup_compass()
 
   g_icm.startupMagnetometer();
   if (g_icm.status != ICM_20948_Stat_Ok) {
-    Serial.print("[ICM] Magnetometer startup failed: ");
-    Serial.println(g_icm.statusString());
+    DEBUG_PRINT("[ICM] Magnetometer startup failed: ");
+    DEBUG_PRINTLN(g_icm.statusString());
     cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer startup failed");
     return false;
   }
 
-  Serial.println("[ICM] Keep cap stationary, collecting gyro/accel baseline...");
+  DEBUG_PRINTLN("[ICM] Keep cap stationary, collecting gyro/accel baseline...");
   set_all_dir_leds(true);
 
   float acc_roll_sum = 0.0f;
@@ -425,7 +438,7 @@ static bool setup_compass()
   set_all_dir_leds(false);
 
   if (sample_count < IMU_INIT_MIN_SAMPLES) {
-    Serial.printf("[ICM] Baseline init failed: only %lu samples\n", sample_count);
+    DEBUG_PRINTF("[ICM] Baseline init failed: only %lu samples\n", sample_count);
     cap_state_set(ENP_CAP_STATE_ERROR, "IMU baseline initialization failed");
     return false;
   }
@@ -437,8 +450,8 @@ static bool setup_compass()
   g_gyr_bias_z = gyr_z_sum / sample_count;
   g_heading_init_done = true;
 
-  Serial.println("[ICM] Compass ready");
-  Serial.printf("[ICM] Init samples=%lu, gyro bias(rad/s)=%.5f, %.5f, %.5f\n",
+  DEBUG_PRINTLN("[ICM] Compass ready");
+  DEBUG_PRINTF("[ICM] Init samples=%lu, gyro bias(rad/s)=%.5f, %.5f, %.5f\n",
                 sample_count, g_gyr_bias_x, g_gyr_bias_y, g_gyr_bias_z);
   g_last_heading_ms = millis();
 
@@ -475,14 +488,15 @@ static void calibrate_magnetometer()
   g_mag_max_x = g_mag_max_y = g_mag_max_z = -INFINITY;
 
   cap_state_set(ENP_CAP_STATE_CALIBRATING, NULL);
-  Serial.println("[CAL] Magnetometer calibration start");
-  Serial.printf("[CAL] Hold still, calibration mode switches in %u ms...\n", CAL_STATE_SWITCH_DELAY_MS);
+  DEBUG_PRINTLN("[CAL] Magnetometer calibration start");
+  DEBUG_PRINTF("[CAL] Hold still, calibration mode switches in %u ms...\n", CAL_STATE_SWITCH_DELAY_MS);
+  ble_debug_logf("Heiluta Hattua Hurrrrjasti!");
   set_all_dir_leds(true);
   delay(CAL_STATE_SWITCH_DELAY_MS);
   set_all_dir_leds(false);
 
-  Serial.println("[CAL] Move cap now");
-  Serial.println("[CAL] Move cap in figure-8 and full rotations...");
+  DEBUG_PRINTLN("[CAL] Move cap now");
+  DEBUG_PRINTLN("[CAL] Move cap in figure-8 and full rotations...");
 
   while ((millis() - start_ms) < MAG_CAL_TIMEOUT_MS && samples < MAG_CAL_MAX_SAMPLES) {
     const uint32_t now = millis();
@@ -521,14 +535,14 @@ static void calibrate_magnetometer()
     samples++;
 
     if ((samples % 100) == 0) {
-      Serial.printf("[CAL] samples=%lu elapsed=%lums\n", samples, now - start_ms);
+      DEBUG_PRINTF("[CAL] samples=%lu elapsed=%lums\n", samples, now - start_ms);
     }
   }
 
   set_all_dir_leds(false);
 
   if (samples < MAG_CAL_MIN_SAMPLES) {
-    Serial.printf("[CAL] Warning: only %lu samples, calibration weak. Offsets left at 0.\n", samples);
+    DEBUG_PRINTF("[CAL] Warning: only %lu samples, calibration weak. Offsets left at 0.\n", samples);
     cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer calibration had too few samples");
     indicate_fault_all_leds();
     return;
@@ -539,7 +553,7 @@ static void calibrate_magnetometer()
   const float rz = (g_mag_max_z - g_mag_min_z) * 0.5f;
 
   if (!has_sane_mag_scaling(rx, ry, rz)) {
-    Serial.printf("[CAL] Invalid ranges rx=%.6f ry=%.6f rz=%.6f, keeping previous calibration\n", rx, ry, rz);
+    DEBUG_PRINTF("[CAL] Invalid ranges rx=%.6f ry=%.6f rz=%.6f, keeping previous calibration\n", rx, ry, rz);
     cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer calibration failed due to invalid ranges");
     indicate_fault_all_leds();
     return;
@@ -555,19 +569,20 @@ static void calibrate_magnetometer()
   g_mag_scale_z = r_avg / rz;
 
   if (!has_sane_mag_scaling(g_mag_scale_x, g_mag_scale_y, g_mag_scale_z)) {
-    Serial.println("[CAL] Invalid computed scales, keeping previous calibration");
+    DEBUG_PRINTLN("[CAL] Invalid computed scales, keeping previous calibration");
     cap_state_set(ENP_CAP_STATE_ERROR, "Magnetometer calibration failed due to invalid scales");
     indicate_fault_all_leds();
     return;
   }
 
-  Serial.printf("[CAL] done samples=%lu duration=%lums\n", samples, millis() - start_ms);
-  Serial.printf("[CAL] min=(%.2f, %.2f, %.2f) max=(%.2f, %.2f, %.2f)\n",
+  DEBUG_PRINTF("[CAL] done samples=%lu duration=%lums\n", samples, millis() - start_ms);
+  DEBUG_PRINTF("[CAL] min=(%.2f, %.2f, %.2f) max=(%.2f, %.2f, %.2f)\n",
                 g_mag_min_x, g_mag_min_y, g_mag_min_z,
                 g_mag_max_x, g_mag_max_y, g_mag_max_z);
-  Serial.printf("[CAL] offsets=(%.2f, %.2f, %.2f)\n", g_mag_off_x, g_mag_off_y, g_mag_off_z);
-  Serial.printf("[CAL] half-ranges=(%.3f, %.3f, %.3f) avg=%.3f\n", rx, ry, rz, r_avg);
-  Serial.printf("[CAL] scales=(%.3f, %.3f, %.3f)\n", g_mag_scale_x, g_mag_scale_y, g_mag_scale_z);
+  DEBUG_PRINTF("[CAL] offsets=(%.2f, %.2f, %.2f)\n", g_mag_off_x, g_mag_off_y, g_mag_off_z);
+  DEBUG_PRINTF("[CAL] half-ranges=(%.3f, %.3f, %.3f) avg=%.3f\n", rx, ry, rz, r_avg);
+  DEBUG_PRINTF("[CAL] scales=(%.3f, %.3f, %.3f)\n", g_mag_scale_x, g_mag_scale_y, g_mag_scale_z);
+  ble_debug_logf("Kalibroitu. Paa piähäs.");
   cap_state_set(ENP_CAP_STATE_NAVIGATING, NULL);
 }
 
@@ -623,7 +638,7 @@ static void update_heading()
   g_direction = apply_declination_deg(head2deg(heading));
 
   if (debug) {
-    Serial.printf("[ICM] dir=%u, roll=%0.2f, pitch=%0.2f\n", g_direction,
+    DEBUG_PRINTF("[ICM] dir=%u, roll=%0.2f, pitch=%0.2f\n", g_direction,
                   g_roll_rad * RAD_TO_DEG, g_pitch_rad * RAD_TO_DEG);
   }
 }
@@ -631,7 +646,7 @@ static void update_heading()
 class CapServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* server) override {
     deviceConnected = true;
-    Serial.println("[BLE] Phone connected");
+    DEBUG_PRINTLN("[BLE] Phone connected");
 
     // Optional: try larger MTU for larger app payload framing.
     // Android side already handles MTU changes if they happen.
@@ -640,7 +655,7 @@ class CapServerCallbacks : public BLEServerCallbacks {
 
   void onDisconnect(BLEServer* server) override {
     deviceConnected = false;
-    Serial.println("[BLE] Phone disconnected");
+    DEBUG_PRINTLN("[BLE] Phone disconnected");
   }
 };
 
@@ -663,7 +678,7 @@ static void del_state(unsigned int state) {
 static int handle_handshake(void *data, unsigned int msglen)
 {
   add_state(HANDSHAKE_RECVD);
-  Serial.println("Handshake recv'd");
+  DEBUG_PRINTLN("Handshake recv'd");
 /*  pTxCharacteristic->setValue((uint8_t*)value.data(), value.size());
       pTxCharacteristic->notify();
       */
@@ -672,7 +687,7 @@ static int handle_handshake(void *data, unsigned int msglen)
 
 static int handle_movement(void *data, unsigned int msglen)
 {
-  Serial.println("Movement recv'd");
+  DEBUG_PRINTLN("Movement recv'd");
   return 0;
 }
 
@@ -684,32 +699,32 @@ static int handle_dest(void *data, unsigned int msglen)
   g_distance = tobe32(hdr->distance_meters);
   add_state(DEST_SET);
 
-  Serial.printf("Dest recv'd, dir %u, distance %u\n",g_dest_dir, g_distance);
+  DEBUG_PRINTF("Dest recv'd, dir %u, distance %u\n",g_dest_dir, g_distance);
   return 0;
 }
 
 static int handle_dest_req(void *data, unsigned int msglen)
 {
-  Serial.println("Dest REQ?? Why did I get this?");
+  DEBUG_PRINTLN("Dest REQ?? Why did I get this?");
   return 0;
 }
 
 static int handle_cap_dir(void *data, unsigned int msglen)
 {
-  Serial.println("Cap DIR?? Why did I get this?");
+  DEBUG_PRINTLN("Cap DIR?? Why did I get this?");
   return 0;
 }
 
 static int handle_cap_dir_start(void *data, unsigned int msglen)
 {
-  Serial.println("Cap Dir Start");
+  DEBUG_PRINTLN("Cap Dir Start");
    add_state(SEND_CAP_DIR);
   return 0;
 }
 
 static int handle_cap_dir_stop(void *data, unsigned int msglen)
 {
-  Serial.println("Cap Dir Stop");
+  DEBUG_PRINTLN("Cap Dir Stop");
      del_state(SEND_CAP_DIR);
   return 0;
 }
@@ -758,7 +773,7 @@ class CapRxCallbacks : public BLECharacteristicCallbacks {
     unsigned int data_len = characteristic->getLength();
     unsigned int handled = 0;
 
-    Serial.printf("Char len %u\n", data_len);
+    DEBUG_PRINTF("Char len %u\n", data_len);
 
     while (handled < data_len) {
       uint32_t type_le;
@@ -779,12 +794,12 @@ class CapRxCallbacks : public BLECharacteristicCallbacks {
       len_le = tobe32(hdr->msg_len);
 
       if (len_le > data_len) {
-        Serial.printf("Bad Data!\n");
-        Serial.printf("MSG type 0x%x, len %u\n", type_le, len_le);
+        DEBUG_PRINTF("Bad Data!\n");
+        DEBUG_PRINTF("MSG type 0x%x, len %u\n", type_le, len_le);
         return;
       }
 
-      Serial.printf("MSG type %u, len %u\n", type_le, len_le);
+      DEBUG_PRINTF("MSG type %u, len %u\n", type_le, len_le);
 
       if (ENP_MESSAGE_TYPE_INVALID >= type_le ||
           ENP_MESSAGE_TYPE_CAP_DIRECTION_REQUEST_STOP < type_le)
@@ -793,7 +808,7 @@ class CapRxCallbacks : public BLECharacteristicCallbacks {
       msg_handler = &g_handlers[type_le];
 
       if (len_le - sizeof(*hdr) < msg_handler->msg_min_len) {
-        Serial.println("MSG too short");
+        DEBUG_PRINTLN("MSG too short");
         goto out_handled;
       }
 
@@ -815,14 +830,14 @@ void setupAdvertising() {
   advertising->setMinPreferred(0x12);
 
   BLEDevice::startAdvertising();
-  Serial.println("[BLE] Advertising started");
+  DEBUG_PRINTLN("[BLE] Advertising started");
 }
 
 void blink(int pin, int numblink)
 {
   int i;
 
-   Serial.printf("Blink LED %d, %d times\n", pin, numblink);
+   DEBUG_PRINTF("Blink LED %d, %d times\n", pin, numblink);
 
   for (i = 0; i < numblink; i++){
     digitalWrite(pin, HIGH);
@@ -844,10 +859,14 @@ void setup_led_gpios()
 }
 
 void setup() {
+
+#ifdef SERIAL_PRINTS
   Serial.begin(115200);
+#endif
+
   delay(300);
   delay(3000);
-  Serial.println("[SYS] Boot");
+  DEBUG_PRINTLN("[SYS] Boot");
 
   setup_led_gpios();
 
@@ -1016,6 +1035,7 @@ static void state_machine()
     uint32_t now = millis();
 
     if ((now - lastDbgMs) >= 1000) {
+      update_heading();
       lastDbgMs = now;
       ble_debug_logf("cap direction: %u deg", g_direction);
     }
@@ -1028,7 +1048,7 @@ void loop() {
   if (!deviceConnected && previouslyConnected) {
     delay(150);
     BLEDevice::startAdvertising();
-    Serial.println("[BLE] Restarted advertising after disconnect");
+    DEBUG_PRINTLN("[BLE] Restarted advertising after disconnect");
     previouslyConnected = deviceConnected;
   }
 
