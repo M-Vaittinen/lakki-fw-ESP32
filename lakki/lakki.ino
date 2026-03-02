@@ -480,6 +480,18 @@ static void indicate_fault_all_leds()
   set_all_dir_leds(false);
 }
 
+static void blink_all_leds()
+{
+  int i;
+
+  for (i = 0; i < 10; i++) {
+    set_all_dir_leds(true);
+    delay(100);
+    set_all_dir_leds(false);
+    delay(100);
+  }
+}
+
 static void calibrate_magnetometer()
 {
   uint32_t samples = 0;
@@ -497,8 +509,9 @@ static void calibrate_magnetometer()
   DEBUG_PRINTLN("[CAL] Magnetometer calibration start");
   DEBUG_PRINTF("[CAL] Hold still, calibration mode switches in %u ms...\n", CAL_STATE_SWITCH_DELAY_MS);
   ble_debug_logf("Heiluta Hattua Hurrrrjasti!");
-  set_all_dir_leds(true);
-  delay(CAL_STATE_SWITCH_DELAY_MS);
+//  set_all_dir_leds(true);
+  blink_all_leds();
+//  delay(CAL_STATE_SWITCH_DELAY_MS);
   set_all_dir_leds(false);
 
   DEBUG_PRINTLN("[CAL] Move cap now");
@@ -506,13 +519,13 @@ static void calibrate_magnetometer()
 
   while ((millis() - start_ms) < MAG_CAL_TIMEOUT_MS && samples < MAG_CAL_MAX_SAMPLES) {
     const uint32_t now = millis();
-
+/*
     if ((now - last_blink_toggle_ms) >= 200) {
       leds_on = !leds_on;
       set_all_dir_leds(leds_on);
       last_blink_toggle_ms = now;
     }
-
+*/
     if (!g_icm.dataReady()) {
       delay(2);
       continue;
