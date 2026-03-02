@@ -201,14 +201,13 @@ void msg_send(void *msg, unsigned int size)
   /* This is not atomic... */
   if (!deviceConnected)
     return;
-  //Serial.printf("Sending msg %p, %u\n", msg, size);
-  DEBUG_PRINTF("Sending:");
+  //DEBUG_PRINTF("Sending:");
 
-  for (i = 0; i < size; i++) {
+ /* for (i = 0; i < size; i++) {
     DEBUG_PRINTF(" 0x%02x", *(((uint8_t *)msg) + i));
-  }
+  } */
 
-  DEBUG_PRINTF("\n");
+//  DEBUG_PRINTF("\n");
 
   pTxCharacteristic->setValue((uint8_t *)msg, size);
   pTxCharacteristic->notify();
