@@ -28,7 +28,7 @@
 
 #define LED_IND_LOOPS 1000;
 
-#define SERIAL_PRINTS
+//#define SERIAL_PRINTS
 
 #ifdef SERIAL_PRINTS
   #define DEBUG_PRINTF Serial.printf
