@@ -28,7 +28,7 @@
 
 #define LED_IND_LOOPS 1000;
 
-#define SERIAL_PRINTS
+//#define SERIAL_PRINTS
 
 #ifdef SERIAL_PRINTS
   #define DEBUG_PRINTF Serial.printf
@@ -170,13 +170,20 @@ static float g_mag_scale_y = 1.0f;
 static float g_mag_scale_z = 1.0f;
 static enp_cap_state_t g_cap_state = ENP_CAP_STATE_UNKNOWN;
 
+/*
 #define MAG_CAL_TIMEOUT_MS 18000U
 #define MAG_CAL_MAX_SAMPLES 18000U
+*/
+
+#define MAG_CAL_TIMEOUT_MS 60000U
+#define MAG_CAL_MAX_SAMPLES 100000U
+
 #define MAG_CAL_MIN_SAMPLES 200U
 #define MAG_CAL_MIN_HALF_RANGE 1.0e-3f
 #define IMU_INIT_TIMEOUT_MS 2000U
 #define IMU_INIT_MIN_SAMPLES 60U
 #define CAL_STATE_SWITCH_DELAY_MS 1500U
+#define MAG_HEADING_AVG_SAMPLES 5U
 
 static void set_all_dir_leds(bool on);
 
@@ -202,13 +209,13 @@ void msg_send(void *msg, unsigned int size)
   if (!deviceConnected)
     return;
   //Serial.printf("Sending msg %p, %u\n", msg, size);
-  DEBUG_PRINTF("Sending:");
+  /*DEBUG_PRINTF("Sending:");
 
   for (i = 0; i < size; i++) {
     DEBUG_PRINTF(" 0x%02x", *(((uint8_t *)msg) + i));
   }
 
-  DEBUG_PRINTF("\n");
+  DEBUG_PRINTF("\n"); */
 
   pTxCharacteristic->setValue((uint8_t *)msg, size);
   pTxCharacteristic->notify();
@@ -474,12 +481,25 @@ static void indicate_fault_all_leds()
   set_all_dir_leds(false);
 }
 
+static void blink_all_leds()
+{
+  int i;
+
+  for (i = 0; i < 10; i++) {
+    set_all_dir_leds(true);
+    delay(100);
+    set_all_dir_leds(false);
+    delay(100);
+  }
+}
+
 static void calibrate_magnetometer()
 {
   uint32_t samples = 0;
   const uint32_t start_ms = millis();
   uint32_t last_blink_toggle_ms = start_ms;
   bool leds_on = false;
+  uint32_t dbg_ms = 0;
 
   if (!g_icm_ready)
     return;
@@ -491,22 +511,24 @@ static void calibrate_magnetometer()
   DEBUG_PRINTLN("[CAL] Magnetometer calibration start");
   DEBUG_PRINTF("[CAL] Hold still, calibration mode switches in %u ms...\n", CAL_STATE_SWITCH_DELAY_MS);
   ble_debug_logf("Heiluta Hattua Hurrrrjasti!");
-  set_all_dir_leds(true);
-  delay(CAL_STATE_SWITCH_DELAY_MS);
+  //set_all_dir_leds(true);
+  blink_all_leds();
+  //delay(CAL_STATE_SWITCH_DELAY_MS);
   set_all_dir_leds(false);
 
   DEBUG_PRINTLN("[CAL] Move cap now");
   DEBUG_PRINTLN("[CAL] Move cap in figure-8 and full rotations...");
+  
 
   while ((millis() - start_ms) < MAG_CAL_TIMEOUT_MS && samples < MAG_CAL_MAX_SAMPLES) {
     const uint32_t now = millis();
-
+/*
     if ((now - last_blink_toggle_ms) >= 200) {
       leds_on = !leds_on;
       set_all_dir_leds(leds_on);
       last_blink_toggle_ms = now;
     }
-
+*/
     if (!g_icm.dataReady()) {
       delay(2);
       continue;
@@ -533,6 +555,15 @@ static void calibrate_magnetometer()
       g_mag_max_z = mz;
 
     samples++;
+
+    if (now - dbg_ms > 1000) {
+      ble_debug_logf("millis: n=%u m=%u d=%u", now, dbg_ms, now-dbg_ms);
+      dbg_ms = millis();
+      
+      ble_debug_logf("max: %f, %f, %f\n",g_mag_max_x, g_mag_max_y, g_mag_max_z);
+      ble_debug_logf("min: %f, %f, %f\n",g_mag_min_x, g_mag_min_y, g_mag_min_z);
+      ble_debug_logf("off: %f, %f, %f\n",(g_mag_max_x + g_mag_min_x)/2.0, (g_mag_max_y+g_mag_min_y)/2.0 , (g_mag_max_z+g_mag_min_z)/2.0);
+    }
 
     if ((samples % 100) == 0) {
       DEBUG_PRINTF("[CAL] samples=%lu elapsed=%lums\n", samples, now - start_ms);
@@ -583,7 +614,23 @@ static void calibrate_magnetometer()
   DEBUG_PRINTF("[CAL] half-ranges=(%.3f, %.3f, %.3f) avg=%.3f\n", rx, ry, rz, r_avg);
   DEBUG_PRINTF("[CAL] scales=(%.3f, %.3f, %.3f)\n", g_mag_scale_x, g_mag_scale_y, g_mag_scale_z);
   ble_debug_logf("Kalibroitu. Paa piähäs.");
+  ble_debug_logf("[cal] min=(%.2f, %.2f, %.2f)uT\n",
+                 g_mag_min_x, g_mag_min_y, g_mag_min_z);
+  ble_debug_logf("[cal] max=(%.2f, %.2f, %.2f)uT\n",
+                 g_mag_max_x, g_mag_max_y, g_mag_max_z);
+  ble_debug_logf("[CAL] offsets=(%.2f, %.2f, %.2f)uT\n", g_mag_off_x, g_mag_off_y, g_mag_off_z);
+
   cap_state_set(ENP_CAP_STATE_NAVIGATING, NULL);
+}
+
+static float heading_diff_deg(float a, float b)
+{
+  float d = fabsf(a - b);
+
+  if (d > 180.0f)
+    d = 360.0f - d;
+
+  return d;
 }
 
 static void update_heading()
@@ -597,19 +644,88 @@ static void update_heading()
   if (!g_icm.dataReady())
     return;
 
-  g_icm.getAGMT();
+  float ax_sum = 0.0f;
+  float ay_sum = 0.0f;
+  float az_sum = 0.0f;
+  float gx_sum = 0.0f;
+  float gy_sum = 0.0f;
+  float mx_sum = 0.0f;
+  float my_sum = 0.0f;
+  float mz_sum = 0.0f;
+  float mx_min = 0.0f;
+  float my_min = 0.0f;
+  float mz_min = 0.0f;
+  float mx_max = 0.0f;
+  float my_max = 0.0f;
+  float mz_max = 0.0f;
+  float mx_samples[MAG_HEADING_AVG_SAMPLES] = {0};
+  float my_samples[MAG_HEADING_AVG_SAMPLES] = {0};
+  float mz_samples[MAG_HEADING_AVG_SAMPLES] = {0};
+  uint8_t samples = 0;
 
-  const float ax = g_icm.accX();
-  const float ay = g_icm.accY();
-  const float az = g_icm.accZ();
-  const float gx = g_icm.gyrX() * DEG_TO_RAD - g_gyr_bias_x;
-  const float gy = g_icm.gyrY() * DEG_TO_RAD - g_gyr_bias_y;
-  const float mx = g_icm.magX();
-  const float my = g_icm.magY();
-  const float mz = g_icm.magZ();
-  const float mx_n = (mx - g_mag_off_x) * g_mag_scale_x;
-  const float my_n = (my - g_mag_off_y) * g_mag_scale_y;
-  const float mz_n = (mz - g_mag_off_z) * g_mag_scale_z;
+  for (uint8_t i = 0; i < MAG_HEADING_AVG_SAMPLES; i++) {
+    if (i > 0 && !g_icm.dataReady())
+      break;
+
+    g_icm.getAGMT();
+
+    const float ax = g_icm.accX();
+    const float ay = g_icm.accY();
+    const float az = g_icm.accZ();
+    const float gx = g_icm.gyrX() * DEG_TO_RAD - g_gyr_bias_x;
+    const float gy = g_icm.gyrY() * DEG_TO_RAD - g_gyr_bias_y;
+    const float mx_n = (g_icm.magX() - g_mag_off_x) * g_mag_scale_x;
+    const float my_n = (g_icm.magY() - g_mag_off_y) * g_mag_scale_y;
+    const float mz_n = (g_icm.magZ() - g_mag_off_z) * g_mag_scale_z;
+
+    if (!samples) {
+      mx_min = mx_n;
+      my_min = my_n;
+      mz_min = mz_n;
+      mx_max = mx_n;
+      my_max = my_n;
+      mz_max = mz_n;
+    } else {
+      if (mx_n < mx_min)
+        mx_min = mx_n;
+      if (my_n < my_min)
+        my_min = my_n;
+      if (mz_n < mz_min)
+        mz_min = mz_n;
+      if (mx_n > mx_max)
+        mx_max = mx_n;
+      if (my_n > my_max)
+        my_max = my_n;
+      if (mz_n > mz_max)
+        mz_max = mz_n;
+    }
+
+    ax_sum += ax;
+    ay_sum += ay;
+    az_sum += az;
+    gx_sum += gx;
+    gy_sum += gy;
+    mx_sum += mx_n;
+    my_sum += my_n;
+    mz_sum += mz_n;
+    mx_samples[samples] = mx_n;
+    my_samples[samples] = my_n;
+    mz_samples[samples] = mz_n;
+    samples++;
+  }
+
+  if (!samples)
+    return;
+
+  const float sample_count = (float)samples;
+  const float ax_avg = ax_sum / sample_count;
+  const float ay_avg = ay_sum / sample_count;
+  const float az_avg = az_sum / sample_count;
+  const float gx_avg = gx_sum / sample_count;
+  const float gy_avg = gy_sum / sample_count;
+  const float mx_avg = mx_sum / sample_count;
+  const float my_avg = my_sum / sample_count;
+  const float mz_avg = mz_sum / sample_count;
 
   const uint32_t now = millis();
   float dt = (now - g_last_heading_ms) / 1000.0f;
@@ -617,31 +733,58 @@ static void update_heading()
     dt = 0.01f;
   g_last_heading_ms = now;
 
-  const float acc_roll = atan2(ay, az);
-  const float acc_pitch = atan2(-ax, sqrtf((ay * ay) + (az * az)));
+  const float acc_roll = atan2(ay_avg, az_avg);
+  const float acc_pitch = atan2(-ax_avg, sqrtf((ay_avg * ay_avg) + (az_avg * az_avg)));
 
-  g_roll_rad = wrap_pi(0.98f * (g_roll_rad + gx * dt) + 0.02f * acc_roll);
-  g_pitch_rad = wrap_pi(0.98f * (g_pitch_rad + gy * dt) + 0.02f * acc_pitch);
+  g_roll_rad = wrap_pi(0.98f * (g_roll_rad + gx_avg * dt) + 0.02f * acc_roll);
+  g_pitch_rad = wrap_pi(0.98f * (g_pitch_rad + gy_avg * dt) + 0.02f * acc_pitch);
 
   const float sin_roll = sinf(g_roll_rad);
   const float cos_roll = cosf(g_roll_rad);
   const float sin_pitch = sinf(g_pitch_rad);
   const float cos_pitch = cosf(g_pitch_rad);
 
-  const float mag_x_h = mx_n * cos_pitch + mz_n * sin_pitch;
-  const float mag_y_h = mx_n * sin_roll * sin_pitch + my_n * cos_roll - mz_n * sin_roll * cos_pitch;
+  const float mag_x_h = mx_avg * cos_pitch + mz_avg * sin_pitch;
+  const float mag_y_h = mx_avg * sin_roll * sin_pitch + my_avg * cos_roll - mz_avg * sin_roll * cos_pitch;
 
   float heading = atan2f(-mag_x_h, mag_y_h);
   if (heading < 0.0f)
     heading += 2.0f * PI;
 
-  g_direction = apply_declination_deg(head2deg(heading));
+  const float heading_avg_deg = (head2deg(heading) + 360) % 360;
+  float max_heading_dev_deg = 0.0f;
+  float first_heading_diff_deg = 0.0f;
+
+  for (uint8_t i = 0; i < samples; i++) {
+    const float sx_h = mx_samples[i] * cos_pitch + mz_samples[i] * sin_pitch;
+    const float sy_h = mx_samples[i] * sin_roll * sin_pitch + my_samples[i] * cos_roll - mz_samples[i] * sin_roll * cos_pitch;
+    float s_heading = atan2f(-sx_h, sy_h);
+
+    if (s_heading < 0.0f)
+      s_heading += 2.0f * PI;
+
+    const float single_heading_deg = (head2deg(s_heading) + 360) % 360;
+    const float dev_deg = heading_diff_deg(single_heading_deg, heading_avg_deg);
+
+    if (!i)
+      first_heading_diff_deg = dev_deg;
+
+    if (dev_deg > max_heading_dev_deg)
+      max_heading_dev_deg = dev_deg;
+  }
+
+  g_direction = apply_declination_deg((int)heading_avg_deg);
 
   if (debug) {
-    DEBUG_PRINTF("[ICM] dir=%u, roll=%0.2f, pitch=%0.2f\n", g_direction,
-                  g_roll_rad * RAD_TO_DEG, g_pitch_rad * RAD_TO_DEG);
+    DEBUG_PRINTF("[ICM] dir=%u roll=%0.2f pitch=%0.2f avgN=%u single-diff=%0.2f max-diff=%0.2f\n",
+                 g_direction, g_roll_rad * RAD_TO_DEG, g_pitch_rad * RAD_TO_DEG,
+                 samples, first_heading_diff_deg, max_heading_dev_deg);
+    DEBUG_PRINTF("[ICM] mag norm min=(%0.3f,%0.3f,%0.3f) max=(%0.3f,%0.3f,%0.3f) avg=(%0.3f,%0.3f,%0.3f)\n",
+                 mx_min, my_min, mz_min, mx_max, my_max, mz_max,
+                 mx_avg, my_avg, mz_avg);
   }
 }
+
 
 class CapServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* server) override {
