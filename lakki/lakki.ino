@@ -170,8 +170,15 @@ static float g_mag_scale_y = 1.0f;
 static float g_mag_scale_z = 1.0f;
 static enp_cap_state_t g_cap_state = ENP_CAP_STATE_UNKNOWN;
 
-#define MAG_CAL_TIMEOUT_MS 18000U
-#define MAG_CAL_MAX_SAMPLES 18000U
+#define LONG_CALIB
+#ifdef LONG_CALIB
+  #define MAG_CAL_TIMEOUT_MS 60000U
+  #define MAG_CAL_MAX_SAMPLES 100000U
+#else
+  #define MAG_CAL_TIMEOUT_MS 18000U
+  #define MAG_CAL_MAX_SAMPLES 18000U
+#endif
+
 #define MAG_CAL_MIN_SAMPLES 200U
 #define MAG_CAL_MIN_HALF_RANGE 1.0e-3f
 #define IMU_INIT_TIMEOUT_MS 2000U
